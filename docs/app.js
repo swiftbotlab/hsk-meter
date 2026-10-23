@@ -1,22 +1,43 @@
 // HSK Meter live dashboard (Swift Bot Labs). Reads the settlement contract's event logs from the public Blockscout
-// API v2 in the browser, decodes them from raw topics/data (no reliance on the explorer's optional decoding) and
+// explorer in the browser, decodes them from raw topics/data (no reliance on the explorer's optional decoding) and
 // counts only endpoints 1 and 2 of our provider. Every value from the API is validated and inserted with
 // textContent; nothing from the network is ever parsed as HTML.
+//
+// Where the numbers come from:
+// - Endpoints 1 and 2 are pinned to their registration transactions below. The contract fixes an endpoint's provider
+//   and payee at registration and has no function that changes them, so ownership is never inferred from the logs.
+// - snapshot.json (tools/dashboard_snapshot.py) holds every counted event from the deploy block up to a fixed block,
+//   checked against the contract's own counters before it was written. The page builds on it and adds newer events.
+// - Newer events: one topic-filtered query per counted event type on the explorer API v2 (newest first, down to the
+//   block already covered), so other event types, such as anyone's approveProvider() calls, never enter the window.
+//   If a type has more pages than the cap, the page asks the explorer's getLogs API with exact filters that only
+//   payments to endpoints 1-2 or our own provider and payee can match. If that fails too (it allows only a few calls
+//   per hour), the affected tiles say "partial data" instead of showing a total.
 "use strict";
 (function () {
-  const API = "https://hsk.blockscout.com/api/v2";
-  const EXPLORER = "https://hsk.blockscout.com";
+  const HOST = "https://hsk.blockscout.com";
+  const API_V2 = HOST + "/api/v2";
+  const API_LOGS = HOST + "/api";          // Etherscan-style getLogs: exact topic filters and a block range
+  const EXPLORER = HOST;
   const CONTRACT = "0x78c8476772bc209c3df09da5e129d0879cd57f8c";
+  const DEPLOY_BLOCK = 29212085;
   const PROVIDER = "0x30ccc6d816854d1a66fbfece15b1515a3e941160";
   const PAYEE = "0xa8a49a6ca872d54a8fd5fb121139de9bff62a48d";
-  const OUR_ENDPOINTS = { 1: "Address profile", 2: "Transaction check" };
+  const ENDPOINTS = {              // registration tx, block and price of each counted endpoint (provider/payee above)
+    1: { name: "Address profile", regTx: "0xec7dd370d753d746a264e3bd13acdca1733b323132e5cbe5184a573ec56f27b4", regBlock: 29212354, price: 10000n },
+    2: { name: "Transaction check", regTx: "0x97e3dd2d6b5cc86a0a81231f84deaf6ae706bbbcf6a2bf916c3750f170464a82", regBlock: 29212356, price: 5000n },
+  };
+  const OUR_IDS = [1, 2];
   const KNOWN = {                  // checksummed display form of the demo roles (topics carry lowercase addresses)
     "0x30ccc6d816854d1a66fbfece15b1515a3e941160": "0x30CCc6d816854d1a66fBfecE15b1515a3E941160",
     "0xa8a49a6ca872d54a8fd5fb121139de9bff62a48d": "0xA8A49A6Ca872D54a8FD5FB121139De9bff62a48D",
     "0x5270fe01fd3d6148b687da0b5693b0425cfca361": "0x5270fE01FD3D6148B687dA0b5693B0425CfCA361",
   };
-  const MAX_PAGES = 40;            // 50 logs per page
-  const MAX_ITEMS = 5000;
+  const MAX_V2_PAGES = 10;         // per event type and refresh: 500 logs newer than the covered block
+  const MAX_LOG_PAGES = 3;         // per exact query and refresh; getLogs returns at most 1000 logs per call
+  const LOG_PAGE = 1000;
+  const LAG_BLOCKS = 300;          // the newest ~10 minutes before the explorer's head are always read again
+  const MAX_ITEMS = 50000;
   const REFRESH_MS = 60000;
   const DAYS_SHOWN = 30;
   const T = {
@@ -27,9 +48,26 @@
     registered: "0x77dd24cff796128cd07781fd29ca7e3193c52b494cfe6761cffb516a7c989c88",
     priceChanged: "0x2bce37c591c5b0d254c3056688b080a088f160fff82b6e79f456c8a20d5570f6",
   };
+  const LIVE_TYPES = ["paid", "refunded", "withdrawn", "paidAuth", "priceChanged", "registered"];
   const RE_WORD = /^0x[0-9a-f]{64}$/;
   const RE_DATA = /^0x(?:[0-9a-f]{64})*$/;
   const RE_TX = /^0x[0-9a-f]{64}$/;
+  const RE_QTY = /^0x[0-9a-f]{1,12}$/;
+  const RE_TS = /^0x[0-9a-f]{1,10}$/;
+  const pad = (hex) => "0x" + hex.replace(/^0x/, "").padStart(64, "0");
+  const ADDR_PREFIX = "0x" + "0".repeat(24);
+  // Exact getLogs filters (also used by tools/dashboard_snapshot.py). Only payments to endpoints 1-2 or our own
+  // provider and payee keys can add matching logs, so nobody else can push our events out of these answers:
+  // - topic1 = 1 or 2: EndpointRegistered, PriceChanged, ActiveSet, Paid and Refunded of our endpoints (plus at most
+  //   one PaidWithAuthorization whose requestId is exactly 1 or 2); topic3 = provider: the PaidWithAuthorization
+  //   logs the provider submitted (and endpoints or payments where the provider itself is payee or payer);
+  // - topic1 or topic3 = payee: its Withdrawn and ProviderApproval logs and every EndpointRegistered that pays it
+  //   (registering an endpoint for a payee needs that payee's approval).
+  const EXACT_QUERIES = [
+    { topic1: pad("1"), topic3: pad(PROVIDER), topic1_3_opr: "or" },
+    { topic1: pad("2") },
+    { topic1: pad(PAYEE), topic3: pad(PAYEE), topic1_3_opr: "or" },
+  ];
 
   const $ = (id) => document.getElementById(id);
   const el = (tag, cls, text) => {
@@ -73,7 +111,7 @@
     return a;
   }
 
-  // ------------------------------------------------------------------ fetch + validate
+  // ------------------------------------------------------------------ validate + classify
   function cleanItem(it) {
     if (!it || typeof it !== "object") return null;
     const addr = it.address && typeof it.address === "object" ? it.address.hash : it.address;
@@ -87,6 +125,7 @@
       if (typeof t !== "string" || !RE_WORD.test(t.toLowerCase())) return null;
       topics.push(t.toLowerCase());
     }
+    if (!topics.length) return null;
     const data = typeof it.data === "string" ? it.data.toLowerCase() : "";
     if (data.length > 2 + 64 * 16 || !RE_DATA.test(data)) return null;
     const block = Number(it.block_number);
@@ -96,6 +135,38 @@
     return { tx, topics, data, block, index, ts };
   }
 
+  // getLogs (Etherscan-style) answer row -> the API v2 item shape cleanItem() reads.
+  function fromRpcLog(r) {
+    if (!r || typeof r !== "object") return null;
+    const bn = typeof r.blockNumber === "string" ? r.blockNumber.toLowerCase() : "";
+    const li = typeof r.logIndex === "string" ? r.logIndex.toLowerCase() : "";
+    const ts = typeof r.timeStamp === "string" ? r.timeStamp.toLowerCase() : "";
+    if (!RE_QTY.test(bn) || !RE_QTY.test(li) || !RE_TS.test(ts)) return null;
+    return { address: r.address, transaction_hash: r.transactionHash, topics: r.topics, data: r.data,
+      block_number: parseInt(bn, 16), index: parseInt(li, 16), block_timestamp: new Date(parseInt(ts, 16) * 1000).toISOString() };
+  }
+
+  const word = (data, i) => BigInt("0x" + data.slice(2 + 64 * i, 2 + 64 * (i + 1)));
+  const topicAddr = (t) => (t.slice(0, 26) === ADDR_PREFIX ? "0x" + t.slice(26) : null);
+  const ID_WORDS = { [pad("1")]: 1, [pad("2")]: 2 };
+  const ourId = (t) => ID_WORDS[t] || 0;
+
+  // The kind of a validated log, or null when the page has no use for it (other endpoints, other accounts, other
+  // event types). Only these logs are kept.
+  function classify(lg) {
+    const t = lg.topics, n = t.length, len = lg.data.length;
+    switch (t[0]) {
+      case T.paid: return n === 4 && len === 2 + 128 && ourId(t[1]) ? "paid" : null;
+      case T.refunded: return n === 4 && len === 2 + 64 && ourId(t[1]) ? "refunded" : null;
+      case T.withdrawn: return n === 3 && len === 2 + 64 && topicAddr(t[1]) === PAYEE ? "withdrawn" : null;
+      case T.paidAuth: return n === 4 && topicAddr(t[3]) === PROVIDER ? "paidAuth" : null;
+      case T.priceChanged: return n === 2 && len === 2 + 128 && ourId(t[1]) ? "priceChanged" : null;
+      case T.registered: return n === 4 && len >= 2 + 64 && topicAddr(t[3]) === PAYEE ? "registered" : null;
+      default: return null;
+    }
+  }
+
+  // ------------------------------------------------------------------ fetch
   async function fetchJson(url, timeoutMs) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
@@ -110,123 +181,221 @@
     }
   }
 
-  async function fetchLive() {
+  // All logs of one event type newer than block `after`, newest first. complete=false: pages remain after the cap.
+  async function fetchV2Type(topic0, after) {
     const items = [];
     let params = null;
-    for (let page = 0; page < MAX_PAGES; page++) {
-      let url = API + "/addresses/" + CONTRACT + "/logs";
+    for (let page = 0; page < MAX_V2_PAGES; page++) {
+      const q = new URLSearchParams({ topic: topic0 });
       if (params) {
-        const q = new URLSearchParams();
         for (const k in params) {
           const v = params[k];
-          if (/^[a-z_]{1,40}$/.test(k) && (typeof v === "number" || (typeof v === "string" && /^[0-9a-zA-Z_.:\-]{0,100}$/.test(v)))) q.set(k, String(v));
+          if (k !== "topic" && /^[a-z_]{1,40}$/.test(k) && (typeof v === "number" || (typeof v === "string" && /^[0-9a-zA-Z_.:\-]{0,100}$/.test(v)))) q.set(k, String(v));
         }
-        url += "?" + q.toString();
       }
-      const body = await fetchJson(url, 20000);
+      const body = await fetchJson(API_V2 + "/addresses/" + CONTRACT + "/logs?" + q.toString(), 20000);
       if (!body || !Array.isArray(body.items)) throw new Error("unexpected API answer");
-      items.push(...body.items);
-      if (items.length >= MAX_ITEMS) break;
+      let reached = false;
+      for (const raw of body.items) {
+        const b = Number(raw && raw.block_number);
+        if (!Number.isSafeInteger(b)) continue;
+        if (b <= after) reached = true;
+        else items.push(raw);
+      }
       params = body.next_page_params && typeof body.next_page_params === "object" ? body.next_page_params : null;
-      if (!params) break;
+      if (reached || !params) return { items, complete: true };
     }
-    return items;
+    return { items, complete: false };
+  }
+
+  function logsResult(body) {
+    if (!body || typeof body !== "object" || !Array.isArray(body.result)) throw new Error("unexpected getLogs answer");
+    if (body.status === "1") return body.result;
+    if (body.status === "0" && body.result.length === 0 && /^No logs found/.test(String(body.message))) return [];
+    throw new Error("getLogs error");
+  }
+
+  // The exact queries from block `from` to the newest block. complete=false: a query still had full pages.
+  async function fetchExact(from) {
+    const items = [];
+    for (const filter of EXACT_QUERIES) {
+      let fromBlock = from, done = false;
+      for (let page = 0; page < MAX_LOG_PAGES && !done; page++) {
+        const q = new URLSearchParams({ module: "logs", action: "getLogs", address: CONTRACT, fromBlock: String(fromBlock), toBlock: "latest" });
+        for (const k in filter) q.set(k, filter[k]);
+        const rows = logsResult(await fetchJson(API_LOGS + "?" + q.toString(), 20000));
+        let last = -1;
+        for (const r of rows) {
+          const it = fromRpcLog(r);
+          if (!it) continue;
+          items.push(it);
+          if (it.block_number > last) last = it.block_number;
+        }
+        if (rows.length < LOG_PAGE) done = true;
+        else if (last <= fromBlock) break;        // 1000+ logs in one block: cannot page further
+        else fromBlock = last;                    // the next page repeats block `last`; duplicates are dropped
+      }
+      if (!done) return { items, complete: false };
+    }
+    return { items, complete: true };
+  }
+
+  // The newest block the explorer has indexed, or null.
+  async function fetchHead() {
+    try {
+      const body = await fetchJson(API_V2 + "/main-page/blocks", 15000);
+      let h = 0;
+      if (Array.isArray(body)) for (const b of body) { const n = Number(b && b.height); if (Number.isSafeInteger(n) && n > h) h = n; }
+      return h > DEPLOY_BLOCK ? h : null;
+    } catch (e) {
+      return null;
+    }
   }
 
   async function fetchSnapshot() {
     const body = await fetchJson("snapshot.json?t=" + Date.now(), 15000);
-    if (!body || !Array.isArray(body.items)) throw new Error("bad snapshot");
+    if (!body || !Array.isArray(body.items) || body.complete !== true || !Number.isSafeInteger(body.toBlock) ||
+        body.toBlock < DEPLOY_BLOCK || !Number.isSafeInteger(body.fromBlock) || body.fromBlock > DEPLOY_BLOCK) throw new Error("bad snapshot");
     const at = Date.parse(body.generatedAt);
-    return { items: body.items, at: Number.isFinite(at) ? at : null };
+    return { items: body.items, toBlock: body.toBlock, at: Number.isFinite(at) ? at : null };
   }
 
-  // ------------------------------------------------------------------ decode + aggregate
-  const word = (data, i) => BigInt("0x" + data.slice(2 + 64 * i, 2 + 64 * (i + 1)));
-  const topicAddr = (t) => "0x" + t.slice(26);
-  const topicInt = (t) => BigInt(t);
+  // ------------------------------------------------------------------ the page's log store
+  // items: every counted log seen (key tx:index). cover[type]: every log of that type up to this block is in items.
+  function newStore(snap) {
+    const s = { items: new Map(), cover: {}, snapshot: !!snap, snapshotAt: snap ? snap.at : null };
+    for (const t of LIVE_TYPES) s.cover[t] = snap ? snap.toBlock : DEPLOY_BLOCK - 1;
+    if (snap) addItems(s, snap.items);
+    return s;
+  }
+  function addItems(s, raws) {
+    for (const raw of raws) {
+      if (s.items.size >= MAX_ITEMS) break;
+      const it = cleanItem(raw);
+      if (it && classify(it)) s.items.set(it.tx + ":" + it.index, raw);
+    }
+  }
+  const FULL = Object.freeze(Object.fromEntries(LIVE_TYPES.map((t) => [t, true])));
 
+  // One refresh. Throws if the API v2 fails (the store is then left as it was). Returns which types are complete.
+  async function refreshLive(s) {
+    const head = await fetchHead();     // read first: a complete answer after this covers every block up to it
+    const res = await Promise.all(LIVE_TYPES.map((t) => fetchV2Type(T[t], s.cover[t])));
+    const cov = {}, items = [];
+    LIVE_TYPES.forEach((t, i) => { cov[t] = res[i].complete; items.push(...res[i].items); });
+    const missing = LIVE_TYPES.filter((t) => !cov[t]);
+    if (missing.length) {
+      try {
+        const ex = await fetchExact(Math.min(...missing.map((t) => s.cover[t])) + 1);
+        items.push(...ex.items);
+        if (ex.complete) for (const t of missing) cov[t] = true;
+      } catch (e) { /* rate limited or unavailable: those types stay partial */ }
+    }
+    addItems(s, items);
+    if (head !== null) for (const t of LIVE_TYPES) if (cov[t]) s.cover[t] = Math.max(s.cover[t], head - LAG_BLOCKS);
+    return cov;
+  }
+
+  // ------------------------------------------------------------------ aggregate
   function aggregate(rawItems) {
     const seen = new Set();
     const logs = [];
     for (const raw of rawItems.slice(0, MAX_ITEMS)) {
       const it = cleanItem(raw);
       if (!it) continue;
+      const kind = classify(it);
+      if (!kind) continue;
       const k = it.tx + ":" + it.index;
       if (seen.has(k)) continue;
       seen.add(k);
+      it.kind = kind;
       logs.push(it);
     }
     logs.sort((a, b) => a.block - b.block || a.index - b.index);   // oldest first
 
-    const endpoints = {};          // id -> {provider, payee, price, paid, ...}
+    const endpoints = {};
+    for (const id of OUR_IDS) {
+      const p = ENDPOINTS[id];
+      endpoints[id] = { id, name: p.name, regTx: p.regTx, provider: PROVIDER, payee: PAYEE, price: p.price, paid: 0, refunded: 0 };
+    }
     const payments = [];           // ours, oldest first
     const byRid = new Map();
-    const authTx = new Set();      // tx:requestId of EIP-3009 payments
-    let refunds = [], withdrawn = 0n, withdrawals = 0, excludedPaid = 0, excludedOther = 0;
-
+    const authTx = new Set();      // tx:requestId of EIP-3009 payments the provider submitted
+    const others = new Set();      // other endpoint ids that also pay our payee
+    const refunds = [];
+    let withdrawn = 0n, withdrawals = 0;
     for (const lg of logs) {
-      const t0 = lg.topics[0];
+      const t = lg.topics;
       try {
-        if (t0 === T.registered && lg.topics.length === 4) {
-          const id = Number(topicInt(lg.topics[1]));
-          endpoints[id] = { id, provider: topicAddr(lg.topics[2]), payee: topicAddr(lg.topics[3]), price: word(lg.data, 0), paid: 0, refunded: 0 };
-        } else if (t0 === T.priceChanged && lg.topics.length === 2) {
-          const id = Number(topicInt(lg.topics[1]));
-          if (endpoints[id]) endpoints[id].price = word(lg.data, 1);
-        } else if (t0 === T.paidAuth && lg.topics.length === 4) {
-          authTx.add(lg.tx + ":" + lg.topics[1]);
-        }
-      } catch (e) { /* malformed log: skipped */ }
-    }
-    const ours = (id) => OUR_ENDPOINTS[id] !== undefined && endpoints[id] && endpoints[id].provider === PROVIDER;
-    const verified = Object.keys(OUR_ENDPOINTS).every((id) => endpoints[id] && endpoints[id].provider === PROVIDER);
-
-    for (const lg of logs) {
-      const t0 = lg.topics[0];
-      try {
-        if (t0 === T.paid && lg.topics.length === 4 && lg.data.length === 2 + 128) {
-          const id = Number(topicInt(lg.topics[1]));
-          if (!ours(id)) { excludedPaid++; continue; }
-          const p = {
-            id, rid: lg.topics[2], payer: topicAddr(lg.topics[3]), payee: "0x" + lg.data.slice(2 + 24, 2 + 64),
-            amount: word(lg.data, 1), tx: lg.tx, ts: lg.ts, gasless: false, refund: null,
-          };
+        if (lg.kind === "paid") {
+          const payer = topicAddr(t[3]);
+          if (!payer || "0x" + lg.data.slice(2 + 24, 2 + 64) !== PAYEE || byRid.has(t[2])) continue;
+          const p = { id: ourId(t[1]), rid: t[2], payer, amount: word(lg.data, 1), tx: lg.tx, ts: lg.ts, gasless: false, refund: null };
           payments.push(p);
           byRid.set(p.rid, p);
-          endpoints[id].paid++;
-        } else if (t0 === T.refunded && lg.topics.length === 4) {
-          const id = Number(topicInt(lg.topics[1]));
-          if (!ours(id)) { excludedOther++; continue; }
-          const r = { id, rid: lg.topics[2], amount: word(lg.data, 0), tx: lg.tx, ts: lg.ts };
+          endpoints[p.id].paid++;
+        } else if (lg.kind === "refunded") {
+          const r = { id: ourId(t[1]), rid: t[2], amount: word(lg.data, 0), tx: lg.tx, ts: lg.ts };
           refunds.push(r);
-          endpoints[id].refunded++;
+          endpoints[r.id].refunded++;
           const p = byRid.get(r.rid);
           if (p) p.refund = r;
-        } else if (t0 === T.withdrawn && lg.topics.length === 3) {
-          if (topicAddr(lg.topics[1]) === PAYEE) { withdrawn += word(lg.data, 0); withdrawals++; }
-          else excludedOther++;
+        } else if (lg.kind === "withdrawn") {
+          withdrawn += word(lg.data, 0);
+          withdrawals++;
+        } else if (lg.kind === "paidAuth") {
+          authTx.add(lg.tx + ":" + t[1]);
+        } else if (lg.kind === "priceChanged") {
+          endpoints[ourId(t[1])].price = word(lg.data, 1);
+        } else if (lg.kind === "registered") {
+          const id = BigInt(t[1]);
+          if (!ourId(t[1]) && id <= 1000000000n) others.add(Number(id));
         }
       } catch (e) { /* malformed log: skipped */ }
     }
     for (const p of payments) p.gasless = authTx.has(p.tx + ":" + p.rid);
-    return { payments, refunds, withdrawn, withdrawals, endpoints, verified, excludedPaid, excludedOther, logCount: logs.length };
+    return { payments, refunds, withdrawn, withdrawals, endpoints, otherPayeeIds: [...others].sort((a, b) => a - b), logCount: logs.length };
   }
 
   // ------------------------------------------------------------------ render: tiles
-  function renderTiles(a) {
+  const PARTIAL = "partial data";
+  function setTile(id, text, partial) {
+    const e = $(id);
+    e.textContent = text;
+    e.classList.toggle("partial", !!partial);
+  }
+  function payeeLine(a, cov, net) {
+    const o = a.otherPayeeIds;
+    if (o.length) return "payee-wide: also endpoint" + (o.length === 1 ? " " : "s ") + o.slice(0, 3).join(", ") + (o.length > 3 ? " +" + (o.length - 3) : "");
+    if (!(cov.paid && cov.refunded && cov.registered)) return "payee-wide, all its endpoints";
+    return "credit left " + fmtUsd(net - a.withdrawn) + " USDC.e";
+  }
+  function renderTiles(a, cov) {
     const n = a.payments.length;
     const paid = a.payments.reduce((s, p) => s + p.amount, 0n);
     const refunded = a.refunds.reduce((s, r) => s + r.amount, 0n);
-    const gasless = a.payments.filter((p) => p.gasless).length;
-    const payers = new Set(a.payments.map((p) => p.payer)).size;
-    $("k-count").textContent = n.toLocaleString("en-US");
-    $("k-count-sub").textContent = gasless + " gasless (EIP-3009) · " + payers + (payers === 1 ? " payer" : " payers");
-    $("k-paid").textContent = fmtUsd(paid);
-    $("k-paid-sub").textContent = "net of refunds " + fmtUsd(paid - refunded);
-    $("k-refund").textContent = n ? (Math.round((a.refunds.length / n) * 1000) / 10).toLocaleString("en-US") + "%" : "–";
-    $("k-refund-sub").textContent = a.refunds.length + (a.refunds.length === 1 ? " refund" : " refunds") + " · " + fmtUsd(refunded) + " USDC.e back";
-    $("k-withdrawn").textContent = fmtUsd(a.withdrawn);
-    $("k-withdrawn-sub").textContent = "credit left " + fmtUsd(paid - refunded - a.withdrawn) + " USDC.e";
+    if (cov.paid && cov.refunded) {
+      const gasless = a.payments.filter((p) => p.gasless).length;
+      const payers = new Set(a.payments.map((p) => p.payer)).size;
+      setTile("k-count", n.toLocaleString("en-US"));
+      $("k-count-sub").textContent = (cov.paidAuth ? gasless + " gasless (EIP-3009)" : "gasless count unavailable") + " · " + payers + (payers === 1 ? " payer" : " payers");
+      setTile("k-paid", fmtUsd(paid));
+      $("k-paid-sub").textContent = "net of refunds " + fmtUsd(paid - refunded);
+      setTile("k-refund", n ? (Math.round((a.refunds.length / n) * 1000) / 10).toLocaleString("en-US") + "%" : "–");
+      $("k-refund-sub").textContent = a.refunds.length + (a.refunds.length === 1 ? " refund" : " refunds") + " · " + fmtUsd(refunded) + " USDC.e back";
+    } else {
+      for (const id of ["k-count", "k-paid", "k-refund"]) setTile(id, PARTIAL, true);
+      $("k-count-sub").textContent = "more events than this page loads";
+      $("k-paid-sub").textContent = "full record on hsk.blockscout.com";
+      $("k-refund-sub").textContent = "full record on hsk.blockscout.com";
+    }
+    if (cov.withdrawn) {
+      setTile("k-withdrawn", fmtUsd(a.withdrawn));
+      $("k-withdrawn-sub").textContent = payeeLine(a, cov, paid - refunded);
+    } else {
+      setTile("k-withdrawn", PARTIAL, true);
+      $("k-withdrawn-sub").textContent = "payee-wide, all its endpoints";
+    }
   }
 
   // ------------------------------------------------------------------ render: per-day chart
@@ -377,7 +546,7 @@
     if (!list.length) { const li = el("li"); li.appendChild(el("span", "empty-row", "No payments yet.")); ol.appendChild(li); return; }
     for (const p of list) {
       const li = el("li");
-      li.append(el("span", "what", OUR_ENDPOINTS[p.id]), el("span", "amt", fmtUsd(p.amount) + " USDC.e"));
+      li.append(el("span", "what", ENDPOINTS[p.id].name), el("span", "amt", fmtUsd(p.amount) + " USDC.e"));
       const d = el("div", "details");
       d.append(el("span", "", fmtTime(p.ts)), el("span", "", "endpoint " + p.id + " · " + (p.gasless ? "gasless x402 (EIP-3009)" : "self-paid pay()")));
       const tx = el("span", "");
@@ -396,64 +565,83 @@
     }
   }
 
-  function renderEndpoints(a) {
+  function renderEndpoints(a, cov) {
     const ul = $("endpoints");
     ul.textContent = "";
-    for (const id of Object.keys(OUR_ENDPOINTS)) {
+    for (const id of OUR_IDS) {
       const e = a.endpoints[id];
       const li = el("li");
-      li.append(el("span", "ep-name", "Endpoint " + id + " · " + OUR_ENDPOINTS[id]),
-        el("span", "ep-price", e ? fmtUsd(e.price) + " USDC.e" : "–"));
+      li.append(el("span", "ep-name", "Endpoint " + id + " · " + e.name),
+        el("span", "ep-price", cov.priceChanged ? fmtUsd(e.price) + " USDC.e" : "–"));
       const sub = el("span", "ep-sub");
-      if (e && e.provider === PROVIDER) {
-        sub.append(document.createTextNode(e.paid + " paid · " + e.refunded + " refunded · provider "), addrLink(e.provider));
-      } else {
-        sub.textContent = e ? "Registered by another provider: not counted" : "Registration not found in the loaded logs";
-      }
+      sub.append(document.createTextNode((cov.paid && cov.refunded ? e.paid + " paid · " + e.refunded + " refunded · " : "") + "provider "),
+        addrLink(e.provider), document.createTextNode(" · registered "), txLink(e.regTx));
       li.appendChild(sub);
       ul.appendChild(li);
     }
-    const ex = a.excludedPaid + a.excludedOther;
-    $("excluded").textContent = ex
-      ? ex + " event" + (ex === 1 ? "" : "s") + " from other endpoints or accounts on this contract " + (ex === 1 ? "is" : "are") + " excluded."
-      : "No activity from other endpoints on this contract so far.";
+    const o = a.otherPayeeIds;
+    $("excluded").textContent = o.length
+      ? "Endpoint" + (o.length === 1 ? " " : "s ") + o.join(", ") + " also pay" + (o.length === 1 ? "s" : "") +
+        " this payee. Those payments are not counted above, but the payee's withdrawals and credit include them."
+      : "Payments to other endpoints of this contract are not counted.";
+  }
+
+  function renderPartialNote(cov) {
+    const note = $("partial-note");
+    const gaps = LIVE_TYPES.filter((t) => !cov[t]);
+    note.hidden = !gaps.length;
+    note.textContent = gaps.length
+      ? "Partial data: the explorer has more matching events than this page loads, and its exact query is busy. " +
+        "Tiles without a total are incomplete, and the chart and list may miss events. The full record is on hsk.blockscout.com."
+      : "";
   }
 
   // ------------------------------------------------------------------ main loop
-  let busy = false, lastAgg = null;
+  let busy = false, lastAgg = null, lastLiveAt = 0, store = null;
   function setState(text, warn) {
     const s = $("source-state");
     s.textContent = text;
     s.classList.toggle("warn", !!warn);
   }
-  function renderAll(a) {
+  function renderAll(a, cov) {
     lastAgg = a;
-    renderTiles(a);
+    renderTiles(a, cov);
     const rows = dayRows(a);
     renderChart(rows);
     renderDayTable(rows);
     renderLatest(a);
-    renderEndpoints(a);
+    renderEndpoints(a, cov);
+    renderPartialNote(cov);
+  }
+  async function ensureStore() {
+    if (store && (store.snapshot || lastLiveAt)) return store;
+    let snap = null;
+    try { snap = await fetchSnapshot(); } catch (e) { snap = null; }
+    store = newStore(snap);
+    return store;
   }
   async function load() {
     if (busy) return;
     busy = true;
     document.body.classList.add("busy");
     $("refresh").disabled = true;
+    let s = null;
     try {
-      const items = await fetchLive();
-      const a = aggregate(items);
-      renderAll(a);
-      const now = new Date().toISOString().slice(11, 19);
-      setState(a.verified ? "Live · hsk.blockscout.com · updated " + now + " UTC" : "Live, but endpoint ownership could not be verified", !a.verified);
+      s = await ensureStore();
+      const cov = await refreshLive(s);
+      renderAll(aggregate([...s.items.values()]), cov);
+      lastLiveAt = Date.now();
+      const partial = LIVE_TYPES.some((t) => !cov[t]);
+      const now = new Date(lastLiveAt).toISOString().slice(11, 19);
+      setState(partial ? "Partial data · hsk.blockscout.com · updated " + now + " UTC" : "Live · hsk.blockscout.com · updated " + now + " UTC", partial);
     } catch (e) {
-      try {
-        const snap = await fetchSnapshot();
-        renderAll(aggregate(snap.items));
-        setState("Explorer API unreachable: showing a snapshot from " + (snap.at ? fmtTime(snap.at) : "an earlier build"), true);
-      } catch (e2) {
-        if (!lastAgg) setState("Could not load data. Open the contract on hsk.blockscout.com instead.", true);
-        else setState("Refresh failed; showing the last loaded data", true);
+      if (lastLiveAt) {
+        setState("Refresh failed; showing data from " + fmtTime(lastLiveAt), true);
+      } else if (s && s.snapshot) {
+        renderAll(aggregate([...s.items.values()]), FULL);
+        setState("Explorer API unreachable: showing a snapshot from " + (s.snapshotAt ? fmtTime(s.snapshotAt) : "an earlier build"), true);
+      } else {
+        setState("Could not load data. Open the contract on hsk.blockscout.com instead.", true);
       }
     } finally {
       busy = false;
@@ -463,7 +651,8 @@
   }
 
   if (typeof window === "undefined") {          // loaded by tools/test_dashboard.js (Node): export the pure parts only
-    module.exports = { aggregate, dayRows, fmtUsd, cleanItem, decimalsFor, niceStep, T, PROVIDER, PAYEE, CONTRACT };
+    module.exports = { aggregate, classify, cleanItem, fromRpcLog, dayRows, fmtUsd, decimalsFor, niceStep, T, PROVIDER, PAYEE,
+      CONTRACT, DEPLOY_BLOCK, ENDPOINTS, EXACT_QUERIES, LIVE_TYPES, MAX_V2_PAGES };
     return;
   }
   let resizeTimer = null;

@@ -8,8 +8,8 @@
 <meta name="description" content="Live per-request payments between agents on HashKey Chain mainnet: USDC.e paid, refunds and withdrawals of the HSK Meter settlement contract.">
 <title>HSK Meter Live</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a78d6'/%3E%3Cpath d='M8 22V10h3v5h4v-5h3v12h-3v-4h-4v4z' fill='%23fff'/%3E%3Crect x='20' y='15' width='4' height='7' rx='1' fill='%23fff'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="style.css?v=2">
-<script src="app.js?v=2" defer></script>
+<link rel="stylesheet" href="style.css?v=3">
+<script src="app.js?v=3" defer></script>
 </head>
 <body>
 <main class="wrap">
@@ -47,6 +47,7 @@
       <p class="tile-sub" id="k-withdrawn-sub">&nbsp;</p>
     </div>
   </section>
+  <p id="partial-note" class="partial-note" role="status" hidden></p>
 
   <section class="card" aria-labelledby="chart-h">
     <div class="card-head">
@@ -83,9 +84,11 @@
       <h2 id="scope-h">What is counted</h2>
     </div>
     <p class="note">Anyone can register endpoints on the settlement contract, so contract-wide totals are not this service's
-      numbers. Only endpoints <b>1</b> and <b>2</b> are counted, and the page checks on-chain that both were registered by
-      provider <a id="provider-link" class="mono" href="https://hsk.blockscout.com/address/0x30CCc6d816854d1a66fBfecE15b1515a3E941160" target="_blank" rel="noopener">0x30CC…1160</a>.
-      Withdrawals are those of payee <a id="payee-link" class="mono" href="https://hsk.blockscout.com/address/0xA8A49A6Ca872D54a8FD5FB121139De9bff62a48D" target="_blank" rel="noopener">0xA8A4…a48D</a>.</p>
+      numbers. Only endpoints <b>1</b> and <b>2</b> are counted. The contract fixes an endpoint's provider and payee when
+      it is registered, so the page pins both registrations: provider
+      <a id="provider-link" class="mono" href="https://hsk.blockscout.com/address/0x30CCc6d816854d1a66fBfecE15b1515a3E941160" target="_blank" rel="noopener">0x30CC…1160</a>,
+      payee <a id="payee-link" class="mono" href="https://hsk.blockscout.com/address/0xA8A49A6Ca872D54a8FD5FB121139De9bff62a48D" target="_blank" rel="noopener">0xA8A4…a48D</a>.
+      Withdrawals and credit belong to the payee, so they cover every endpoint that pays it.</p>
     <ul id="endpoints" class="endpoints"></ul>
     <p class="note" id="excluded"></p>
     <dl class="facts">

@@ -93,6 +93,11 @@ h1 { margin: 2px 0 6px; font-size: 28px; line-height: 1.15; font-weight: 700; }
 .tile-label { margin: 0; color: var(--ink-2); font-size: 13px; }
 .tile-value { margin: 2px 0 0; font-size: 26px; font-weight: 650; line-height: 1.2; overflow-wrap: anywhere; }
 .tile-sub { margin: 2px 0 0; color: var(--ink-3); font-size: 12.5px; }
+.tile-value.partial { font-size: 17px; font-weight: 600; color: var(--ink-2); padding: 6px 0 4px; }
+.partial-note {
+  margin: -4px 0 14px; padding: 10px 12px; border-radius: 10px; background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--ring), inset 3px 0 0 var(--series-refund); color: var(--ink-1); font-size: 13.5px; max-width: 80ch;
+}
 
 .card { position: relative; background: var(--surface); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--ring); padding: 14px; margin-bottom: 14px; }
 .card-head h2 { margin: 0; font-size: 17px; font-weight: 650; }
