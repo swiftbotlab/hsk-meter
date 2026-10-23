@@ -10,6 +10,8 @@
 # $HOME (other secrets, browser profiles, other projects), /var, D-Bus and other sockets.
 # The network namespace is shared (the seller must reach the RPC and accept local connections); outgoing connections
 # are limited in-process by server/egress.py to the RPC host on port 443.
+# --die-with-parent: stopping the launcher (or its service) stops the seller too; without it, SIGTERM to the outer
+# bwrap left the inner sandbox running.
 # Why bwrap and not systemd's ProtectHome=/IPAddressDeny=: per-user systemd managers on hosts that restrict
 # unprivileged user namespaces silently skip those directives; bwrap enforces the allowlist itself.
 set -euo pipefail
@@ -25,7 +27,7 @@ done
 mkdir -p "$STATE"
 chmod 700 "$STATE"
 ARGS=(--unshare-user-try --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try
-      --new-session --clearenv --cap-drop ALL
+      --new-session --die-with-parent --clearenv --cap-drop ALL
       --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/sbin /sbin
       --ro-bind /etc /etc
       --dev /dev --proc /proc --tmpfs /tmp --tmpfs /run --tmpfs /home)

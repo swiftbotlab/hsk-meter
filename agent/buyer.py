@@ -6,6 +6,8 @@ authorization (or pays the contract itself), and verifies everything it is told 
            [--max-price 0.05] [--session-cap 0.20] [--contract 0x...] [--pin-adapter 0x...] [--session-file F]
   (--key-file: a file with HKPW_BUYER_PK=0x...; defaults: $HSK_METER_BUYER_KEY_FILE, $HSK_METER_PROVIDER,
    $HSK_METER_PAYEE)
+  As a library: quote() (price + guard, signs nothing), buy() (one paid request), status() (ledger + balance);
+  agent/mcp_server.py exposes them as MCP tools.
 
 Spend guard (checked BEFORE signing anything): network eip155:177 only; asset USDC.e only; payTo must be the
 expected contract (--contract, default ops/state/deployment.json) whose token() is USDC.e; the endpoint must belong to
@@ -66,7 +68,10 @@ def http_get(url, headers, timeout=120):
         with OPENER.open(req, timeout=timeout) as r:
             return r.status, dict(r.headers), json.loads(r.read(200_001)[:200_000] or b"{}")
     except urllib.error.HTTPError as e:
-        raw = e.read(200_001)[:200_000]
+        try:
+            raw = e.read(200_001)[:200_000]
+        finally:
+            e.close()
         try:
             body = json.loads(raw or b"{}")
         except ValueError:
@@ -227,17 +232,214 @@ def verify_paid(rpc, contract, tx, rid, me, amount, eid):
     return True, "Paid event matches (payer, amount, endpoint, request)"
 
 
-def verify_refund(rpc, contract, tx, rid, me, amount):
-    rc = rpc("eth_getTransactionReceipt", [tx], tries=3)
+def verify_refund(rpc, contract, tx, rid, me, amount, state_tries=10, wait_s=1.5):
+    rc = None
+    for _ in range(20):        # our RPC node can be a block behind the seller's
+        rc = rpc("eth_getTransactionReceipt", [tx], tries=2)
+        if rc:
+            break
+        time.sleep(2)
     if not rc or rc.get("status") != "0x1":
         return False, "refund tx missing or reverted"
     for lg in rc.get("logs") or []:
         t = lg.get("topics") or []
         if (str(lg.get("address", "")).lower() == contract.lower() and len(t) == 4 and t[0].lower() == REFUNDED_TOPIC
                 and t[2].lower() == rid.lower() and t[3][-40:].lower() == me.lower()[2:] and int(lg["data"], 16) == amount):
-            pay = C.read_payment(rpc, contract, rid)
-            return pay["refunded"], "Refunded event matches; getPayment().refunded = " + str(pay["refunded"])
+            # read the state AT the refund's block: a lagging node answers stale or errors, so retry (seen live on
+            # mainnet 2026-10-23: the event matched while getPayment().refunded still read False one block behind)
+            for i in range(state_tries):
+                try:
+                    if C.read_payment(rpc, contract, rid, block=rc.get("blockNumber", "latest"))["refunded"]:
+                        return True, "Refunded event matches; getPayment().refunded = True"
+                except C.RpcError:
+                    pass
+                if i + 1 < state_tries:
+                    time.sleep(wait_s)
+            return False, "Refunded event matches but getPayment().refunded is still False"
     return False, "no matching Refunded event"
+
+
+def check_target(rpc, url, contract):
+    """Refuse a URL we must not talk to and a contract that does not settle in USDC.e."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme not in ("http", "https") or (u.scheme == "http" and u.hostname not in ("127.0.0.1", "localhost")):
+        raise Refused("URL must be https (or http on localhost)")
+    if C.eth_call(rpc, contract, "token()", [], [], ["address"])[0].lower() != P.USDCE.lower():
+        raise Refused("contract does not settle in USDC.e")
+
+
+def _payment_required(hdr, body):
+    hreq = {k.lower(): v for k, v in hdr.items()}.get("payment-required")
+    if not hreq or P.parse_b64json(hreq, max_chars=16384) != body:
+        raise Refused("PAYMENT-REQUIRED header missing or different from the body")
+
+
+def quote(url, *, me, rpc, contract, expect_provider, expect_payee, max_units, cap_units, session_file=SESSION,
+          scheme="exact", http=http_get):
+    """Ask the seller for its price and run the spend guard on it. Signs nothing and reserves nothing."""
+    check_target(rpc, url, contract)
+    st, hdr, body = http(url, {"X-Payer": me.address})
+    out = {"url": url, "quoteStatus": st}
+    if st != 402:
+        return {**out, "guard": "no quote: the seller did not answer 402", "sellerAnswer": body}
+    _payment_required(hdr, body)
+    session = Session(session_file)
+    acc = next((a for a in body.get("accepts") or [] if isinstance(a, dict) and a.get("scheme") == "exact"), {}) or {}
+    x = acc.get("extra") or {}
+    try:
+        acc, eid, amount, rid, e = check_quote(rpc, body, url, me.address, contract, max_units, cap_units, scheme,
+                                               session, expect_provider, expect_payee)
+        guard = "pass"
+    except (Refused, KeyError, ValueError, TypeError) as err:
+        guard = "refused: " + (str(err) if isinstance(err, Refused) else "malformed quote")
+        eid = x.get("endpointId")
+        amount = int(acc["amount"]) if str(acc.get("amount", "")).isdigit() else None
+        e = {}
+    out.update({"guard": guard, "endpointId": int(eid) if str(eid).isdigit() else None, "amountUnits": amount,
+                "amountUSDCe": str(Decimal(amount) / 10**6) if amount is not None else None,
+                "resource": x.get("resource"), "network": acc.get("network"), "asset": acc.get("asset"),
+                "settlementContract": acc.get("payTo"), "provider": e.get("provider"), "payee": e.get("payee"),
+                "hspOffered": bool((body.get("extensions") or {}).get("hsp-draft")),
+                "sessionUsedUnits": session.total(), "sessionCapUnits": cap_units, "maxPriceUnits": max_units})
+    return out
+
+
+def status(*, me, rpc, cap_units, session_file=SESSION):
+    """The spend ledger and the payer's USDC.e balance."""
+    with Session(session_file)._ledger() as d:
+        spent, reserved = d["spent_units"], sum(r["amount"] for r in d["reserved"].values())
+    bal = C.eth_call(rpc, P.USDCE, "balanceOf(address)", ["address"], [me.address], ["uint256"])[0]
+    return {"payer": me.address, "spentUnits": spent, "reservedUnits": reserved, "capUnits": cap_units,
+            "remainingUnits": max(0, cap_units - spent - reserved), "usdceBalanceUnits": bal,
+            "usdceBalance": str(Decimal(bal) / 10**6)}
+
+
+def buy(url, *, me, rpc, contract, expect_provider, expect_payee, max_units, cap_units, scheme="exact", hsp=False,
+        pin_adapter=None, session_file=SESSION, http=http_get):
+    """Pay for one request and verify what we are told against the chain. Returns the run record (as printed by the
+    CLI). Raises Refused when the guard refuses; a non-402 first answer is returned with quote_status and body."""
+    check_target(rpc, url, contract)
+    session = Session(session_file)
+    out = {"url": url, "scheme": scheme, "payer": me.address}
+    rec = session.reconcile(rpc, contract, me.address)
+    if rec:
+        out["ledger_reconciled"] = rec
+    t0 = time.time()
+    st, hdr, body = http(url, {"X-Payer": me.address})
+    out["quote_status"] = st
+    if st != 402:
+        out["body"] = body
+        return out
+    _payment_required(hdr, body)
+    try:
+        acc, eid, amount, rid, e = check_quote(rpc, body, url, me.address, contract, max_units, cap_units, scheme,
+                                               session, expect_provider, expect_payee)
+    except (Refused, KeyError, ValueError, TypeError) as err:
+        msg = str(err) if isinstance(err, Refused) else f"malformed quote ({type(err).__name__})"
+        journal({**out, "refused": msg})
+        raise Refused(msg)
+    x = acc["extra"]
+    out.update({"endpointId": eid, "amount": amount, "requestId": rid})
+    hx = (body.get("extensions") or {}).get("hsp-draft") if hsp else None
+    if hsp and not hx:
+        raise Refused("server offered no hsp-draft extension")
+    bal_before = C.eth_call(rpc, P.USDCE, "balanceOf(address)", ["address"], [me.address], ["uint256"])[0]
+    if scheme == "exact":
+        now = int(time.time())
+        try:   # counted against the cap BEFORE the signature exists
+            session.reserve(rid, amount, cap_units, "exact", x["nonce"].lower(), now + AUTH_VALID_S)
+        except Refused as err:
+            journal({**out, "refused": str(err)})
+            raise
+        td = P.receive_auth_typed_data(me.address, contract, amount, 0, now + AUTH_VALID_S, x["nonce"])
+        sig = "0x" + me.sign_message(encode_typed_data(full_message=td)).signature.hex()
+        payload = {"x402Version": 2, "resource": body.get("resource"), "accepted": acc,
+                   "payload": {"signature": sig, "authorization": {
+                       "from": me.address, "to": contract, "value": str(amount), "validAfter": "0",
+                       "validBefore": str(now + AUTH_VALID_S), "nonce": x["nonce"]}}}
+        mandate = None
+        if hsp:
+            mandate = HSP.mandate_message(payer=me.address, payee=e["payee"], token=P.USDCE, amount=amount, reference=rid,
+                                          required_caps=[HSP.CAP_SETTLED], deadline=now + 900)
+            msig = HSP.sign_mandate(me, mandate, P.CHAIN_ID)
+            payload["extensions"] = {"hsp-draft": {"mandate": HSP.mandate_to_json(mandate), "signature": msig}}
+            out["paymentId"] = HSP.mandate_hash(mandate, P.CHAIN_ID)
+        h = {"X-Payer": me.address, "PAYMENT-SIGNATURE": P.b64json(payload)}
+        for _ in range(8):     # the same header is safe to resend: the server settles a request id at most once
+            st, hdr, res = http(url, h)
+            if st not in (409, 503) or not (res or {}).get("retryable"):
+                break
+            ra = str({k.lower(): v for k, v in hdr.items()}.get("retry-after", "3"))
+            time.sleep(min(int(ra), 10) if ra.isascii() and ra.isdigit() else 3)
+    else:
+        try:
+            session.reserve(rid, amount, cap_units, "tx", None, time.time() + TX_RESERVE_S)
+        except Refused as err:
+            journal({**out, "refused": str(err)})
+            raise
+        allowance = C.eth_call(rpc, P.USDCE, "allowance(address,address)", ["address", "address"], [me.address, contract], ["uint256"])[0]
+        sender = C.Sender(rpc, me, P.CHAIN_ID, budgets={"settle": 5 * 10**17})
+        if allowance < amount:
+            rc = sender.send(P.USDCE, C.selector("approve(address,uint256)") + encode(["address", "uint256"], [contract, amount]))
+            out["approve_tx"] = rc["transactionHash"]
+            for _ in range(15):   # wait until the RPC node we read from sees the allowance (nodes can lag a block)
+                if C.eth_call(rpc, P.USDCE, "allowance(address,address)", ["address", "address"], [me.address, contract], ["uint256"])[0] >= amount:
+                    break
+                time.sleep(2)
+        rc = sender.send(contract, C.selector("pay(uint256,bytes32,uint256)") + encode(
+            ["uint256", "bytes32", "uint256"], [eid, bytes.fromhex(rid[2:]), amount]), lag_retries=2)
+        if rc.get("status") != "0x1":
+            journal({**out, "refused": "pay() reverted", "pay_tx": rc.get("transactionHash")})
+            raise Refused("pay() reverted on-chain; nothing was charged")
+        out["pay_tx"] = rc["transactionHash"]
+        res = None
+        for _ in range(5):
+            st, hdr, res = http(url, {"X-Payer": me.address, "X-Paywall-Token": x["token"], "X-Paywall-Tx": rc["transactionHash"]})
+            if st not in (402,) or not res.get("retryable"):
+                break
+            time.sleep(2)
+    out["status"] = st
+    out["ms"] = int((time.time() - t0) * 1000)
+    pr = {k.lower(): v for k, v in hdr.items()}.get("payment-response")
+    if pr:
+        out["payment_response"] = P.parse_b64json(pr, max_chars=4096)
+    pay = (res or {}).get("payment") or {}
+    tx = pay.get("tx") or out.get("pay_tx")
+    if tx:
+        ok, why = verify_paid(rpc, contract, tx, rid, me.address, amount, eid)
+        out["settlement_tx"], out["settlement_verified"], out["settlement_check"] = tx, ok, why
+        if ok:
+            out["session_spent_units"] = session.commit(rid)
+    if st == 200:
+        out["data"] = res.get("data")
+        if hsp and res.get("hsp"):
+            h = res["hsp"]
+            pinned = pin_adapter or h.get("adapter")
+            dec = HSP.verify(mandate=HSP.mandate_from_json(h["mandate"]), mandate_sig=h["mandateSignature"],
+                             receipt=HSP.receipt_from_json(h["receipt"]), receipt_sig=h["receiptSignature"],
+                             chain_id=P.CHAIN_ID, pinned_adapter=pinned)
+            out["hsp_buyer_decision"] = dec["outcomeClass"]
+            out["hsp_adapter_pinned"] = pinned if pin_adapter else f"{pinned} (from server: pass --pin-adapter to pin)"
+    elif (res or {}).get("refund"):
+        r = res["refund"]
+        out["refund_tx"] = r.get("tx")
+        if r.get("tx"):
+            ok, why = verify_refund(rpc, contract, r["tx"], rid, me.address, amount)
+            out["refund_verified"], out["refund_check"] = ok, why
+            if ok:
+                out["session_spent_units"] = session.refunded(rid)
+        out["message"] = res.get("message")
+    else:
+        out["error"] = res
+    bal_after = C.eth_call(rpc, P.USDCE, "balanceOf(address)", ["address"], [me.address], ["uint256"])[0]
+    for _ in range(5):   # the RPC node we read from can be a block behind the settlement
+        if not out.get("settlement_verified") or out.get("refund_verified") or bal_after != bal_before:
+            break
+        time.sleep(1.5)
+        bal_after = C.eth_call(rpc, P.USDCE, "balanceOf(address)", ["address"], [me.address], ["uint256"])[0]
+    out["usdce_before"], out["usdce_after"] = bal_before / 1e6, bal_after / 1e6
+    journal({k: v for k, v in out.items() if k != "data"})
+    return out
 
 
 def main():
@@ -263,136 +465,17 @@ def main():
     for flag, v in (("--expect-provider", a.expect_provider), ("--expect-payee", a.expect_payee)):
         if not P.ADDR_RE.match(v):
             sys.exit(f"{flag} must be an address")
-    u = urllib.parse.urlsplit(a.url)
-    if u.scheme not in ("http", "https") or (u.scheme == "http" and u.hostname not in ("127.0.0.1", "localhost")):
-        sys.exit("URL must be https (or http on localhost)")
     contract = a.contract or json.load(open(os.path.join(STATE, "deployment.json")))["address"]
-    rpc = C.Rpc("https://mainnet.hsk.xyz")
-    if C.eth_call(rpc, contract, "token()", [], [], ["address"])[0].lower() != P.USDCE.lower():
-        sys.exit("contract does not settle in USDC.e; refusing")
-    me = load_key(a.key_file)
-    max_units = int(Decimal(a.max_price) * 10**6)
-    cap_units = int(Decimal(a.session_cap) * 10**6)
-    session = Session(a.session_file)
-    out = {"url": a.url, "scheme": a.scheme, "payer": me.address}
-    rec = session.reconcile(rpc, contract, me.address)
-    if rec:
-        out["ledger_reconciled"] = rec
-    t0 = time.time()
-    st, hdr, body = http_get(a.url, {"X-Payer": me.address})
-    out["quote_status"] = st
-    if st != 402:
-        print(json.dumps({**out, "body": body}, indent=1))
-        sys.exit("expected 402")
-    hreq = {k.lower(): v for k, v in hdr.items()}.get("payment-required")
-    if not hreq or P.parse_b64json(hreq, max_chars=16384) != body:
-        sys.exit("PAYMENT-REQUIRED header missing or different from the body")
     try:
-        acc, eid, amount, rid, e = check_quote(rpc, body, a.url, me.address, contract, max_units, cap_units, a.scheme,
-                                               session, a.expect_provider, a.expect_payee)
-    except (Refused, KeyError, ValueError) as err:
-        journal({**out, "refused": str(err)})
+        out = buy(a.url, me=load_key(a.key_file), rpc=C.Rpc("https://mainnet.hsk.xyz"), contract=contract,
+                  expect_provider=a.expect_provider, expect_payee=a.expect_payee,
+                  max_units=int(Decimal(a.max_price) * 10**6), cap_units=int(Decimal(a.session_cap) * 10**6),
+                  scheme=a.scheme, hsp=a.hsp, pin_adapter=a.pin_adapter, session_file=a.session_file)
+    except Refused as err:
         sys.exit(f"REFUSED: {err}")
-    x = acc["extra"]
-    out.update({"endpointId": eid, "amount": amount, "requestId": rid})
-    bal_before = C.eth_call(rpc, P.USDCE, "balanceOf(address)", ["address"], [me.address], ["uint256"])[0]
-    if a.scheme == "exact":
-        now = int(time.time())
-        try:   # counted against the cap BEFORE the signature exists
-            session.reserve(rid, amount, cap_units, "exact", x["nonce"].lower(), now + AUTH_VALID_S)
-        except Refused as err:
-            journal({**out, "refused": str(err)})
-            sys.exit(f"REFUSED: {err}")
-        td = P.receive_auth_typed_data(me.address, contract, amount, 0, now + AUTH_VALID_S, x["nonce"])
-        sig = "0x" + me.sign_message(encode_typed_data(full_message=td)).signature.hex()
-        payload = {"x402Version": 2, "resource": body.get("resource"), "accepted": acc,
-                   "payload": {"signature": sig, "authorization": {
-                       "from": me.address, "to": contract, "value": str(amount), "validAfter": "0",
-                       "validBefore": str(now + AUTH_VALID_S), "nonce": x["nonce"]}}}
-        mandate = None
-        if a.hsp:
-            hx = (body.get("extensions") or {}).get("hsp-draft")
-            if not hx:
-                sys.exit("server offered no hsp-draft extension")
-            mandate = HSP.mandate_message(payer=me.address, payee=e["payee"], token=P.USDCE, amount=amount, reference=rid,
-                                          required_caps=[HSP.CAP_SETTLED], deadline=now + 900)
-            msig = HSP.sign_mandate(me, mandate, P.CHAIN_ID)
-            payload["extensions"] = {"hsp-draft": {"mandate": HSP.mandate_to_json(mandate), "signature": msig}}
-            out["paymentId"] = HSP.mandate_hash(mandate, P.CHAIN_ID)
-        h = {"X-Payer": me.address, "PAYMENT-SIGNATURE": P.b64json(payload)}
-        for _ in range(8):     # the same header is safe to resend: the server settles a request id at most once
-            st, hdr, res = http_get(a.url, h)
-            if st not in (409, 503) or not (res or {}).get("retryable"):
-                break
-            ra = str({k.lower(): v for k, v in hdr.items()}.get("retry-after", "3"))
-            time.sleep(min(int(ra), 10) if ra.isascii() and ra.isdigit() else 3)
-    else:
-        try:
-            session.reserve(rid, amount, cap_units, "tx", None, time.time() + TX_RESERVE_S)
-        except Refused as err:
-            journal({**out, "refused": str(err)})
-            sys.exit(f"REFUSED: {err}")
-        allowance = C.eth_call(rpc, P.USDCE, "allowance(address,address)", ["address", "address"], [me.address, contract], ["uint256"])[0]
-        sender = C.Sender(rpc, me, P.CHAIN_ID, budgets={"settle": 5 * 10**17})
-        if allowance < amount:
-            rc = sender.send(P.USDCE, C.selector("approve(address,uint256)") + encode(["address", "uint256"], [contract, amount]))
-            out["approve_tx"] = rc["transactionHash"]
-            for _ in range(15):   # wait until the RPC node we read from sees the allowance (nodes can lag a block)
-                if C.eth_call(rpc, P.USDCE, "allowance(address,address)", ["address", "address"], [me.address, contract], ["uint256"])[0] >= amount:
-                    break
-                time.sleep(2)
-        rc = sender.send(contract, C.selector("pay(uint256,bytes32,uint256)") + encode(
-            ["uint256", "bytes32", "uint256"], [eid, bytes.fromhex(rid[2:]), amount]), lag_retries=2)
-        if rc.get("status") != "0x1":
-            sys.exit("pay() reverted")
-        out["pay_tx"] = rc["transactionHash"]
-        res = None
-        for _ in range(5):
-            st, hdr, res = http_get(a.url, {"X-Payer": me.address, "X-Paywall-Token": x["token"], "X-Paywall-Tx": rc["transactionHash"]})
-            if st not in (402,) or not res.get("retryable"):
-                break
-            time.sleep(2)
-    out["status"] = st
-    out["ms"] = int((time.time() - t0) * 1000)
-    pr = {k.lower(): v for k, v in hdr.items()}.get("payment-response")
-    if pr:
-        out["payment_response"] = P.parse_b64json(pr, max_chars=4096)
-    pay = (res or {}).get("payment") or {}
-    tx = pay.get("tx") or out.get("pay_tx")
-    if tx:
-        ok, why = verify_paid(rpc, contract, tx, rid, me.address, amount, eid)
-        out["settlement_tx"], out["settlement_verified"], out["settlement_check"] = tx, ok, why
-        if ok:
-            out["session_spent_units"] = session.commit(rid)
-    if st == 200:
-        out["data"] = res.get("data")
-        if a.hsp and res.get("hsp"):
-            h = res["hsp"]
-            pinned = a.pin_adapter or h.get("adapter")
-            dec = HSP.verify(mandate=HSP.mandate_from_json(h["mandate"]), mandate_sig=h["mandateSignature"],
-                             receipt=HSP.receipt_from_json(h["receipt"]), receipt_sig=h["receiptSignature"],
-                             chain_id=P.CHAIN_ID, pinned_adapter=pinned)
-            out["hsp_buyer_decision"] = dec["outcomeClass"]
-            out["hsp_adapter_pinned"] = pinned if a.pin_adapter else f"{pinned} (from server: pass --pin-adapter to pin)"
-    elif (res or {}).get("refund"):
-        r = res["refund"]
-        out["refund_tx"] = r.get("tx")
-        if r.get("tx"):
-            ok, why = verify_refund(rpc, contract, r["tx"], rid, me.address, amount)
-            out["refund_verified"], out["refund_check"] = ok, why
-            if ok:
-                out["session_spent_units"] = session.refunded(rid)
-        out["message"] = res.get("message")
-    else:
-        out["error"] = res
-    bal_after = C.eth_call(rpc, P.USDCE, "balanceOf(address)", ["address"], [me.address], ["uint256"])[0]
-    for _ in range(5):   # the RPC node we read from can be a block behind the settlement
-        if not out.get("settlement_verified") or out.get("refund_verified") or bal_after != bal_before:
-            break
-        time.sleep(1.5)
-        bal_after = C.eth_call(rpc, P.USDCE, "balanceOf(address)", ["address"], [me.address], ["uint256"])[0]
-    out["usdce_before"], out["usdce_after"] = bal_before / 1e6, bal_after / 1e6
-    journal({k: v for k, v in out.items() if k != "data"})
+    if out.get("quote_status") != 402:
+        print(json.dumps(out, indent=1, default=str))
+        sys.exit("expected 402")
     print(json.dumps(out, indent=1, default=str))
 
 

@@ -74,7 +74,7 @@
 `deploy/run_sandboxed.sh` runs the seller under bubblewrap. Visible inside: `/usr`, `/etc`, the repository's `server/`
 and `deploy/` and the deployment record (read-only), the Python environment (read-only), the key directory (read-only)
 and the state directory (read-write); private `/tmp`, `/run` and `/home`, own PID/IPC/UTS namespaces, a clean
-environment, all capabilities dropped. `deploy/sandbox_probe.py` shows what the process can reach: inside the sandbox
+environment, all capabilities dropped. The sandbox dies with its launcher (`--die-with-parent`). `deploy/sandbox_probe.py` shows what the process can reach: inside the sandbox
 it cannot see other key files or the rest of the home directory, cannot write its own code or its keys, and (with the
 egress guard) cannot connect to loopback services such as a browser debugging port, the LAN or any host other than the
 RPC. Positive controls: the same probe outside the sandbox reaches all of them, and inside the sandbox with the guard
@@ -99,6 +99,16 @@ off the network targets become reachable.
 - The spend cap counts a payment before the authorization is signed (or the pay transaction sent). The reservation
   becomes spent when the payment is verified, and is released only when the chain shows nothing can be charged any more
   (`getPayment` unpaid and, after `validBefore`, `authorizationState == false`).
+
+## MCP server (`agent/mcp_server.py`)
+
+- The MCP client is treated as untrusted input. It can only name a URL and, optionally, ask for HSP verification or a
+  lower price limit. The key, the allowed seller origins (exact scheme, host and port), the pinned provider, payee and
+  adapter, the per-request price limit, the session cap and the payments-per-minute limit are fixed by the operator at
+  start. Unknown arguments, URLs with credentials or fragments, non-`/v1/` paths and non-printable characters are refused
+  before any request is made.
+- Every payment goes through the buyer's guard above. Seller data is returned as untrusted content and is never
+  interpreted. Messages over 1 MB, batches and malformed JSON are rejected; logs go to stderr without keys or signatures.
 
 ## Dependencies
 
