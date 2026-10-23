@@ -1,0 +1,11 @@
+tmp/
+contracts/out/
+contracts/cache/
+__pycache__/
+*.pyc
+ops/state/buyer_session.json
+*.bak-*
+# internal operator notes and scripts (funding, local key handling) stay out of the repository
+STATUS.md
+ops/*.py
+ops/state/*.jsonl

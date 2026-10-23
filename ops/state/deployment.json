@@ -1,0 +1,17 @@
+{
+ "network": "hashkey-mainnet",
+ "chainId": 177,
+ "address": "0x78C8476772BC209C3df09Da5e129d0879cd57F8c",
+ "tx": "0xe08891e35a7197a62a5cb165a6e2dea194842f3dba00711fc65207cec120fe73",
+ "block": 29212085,
+ "deployer": "0x7Cc738F4F7d9F70D26aE0Ed07d0958e3B00Ac857",
+ "token": "0x054ed45810DbBAb8B27668922D110669c9D88D0a",
+ "runtime_bytes": 8726,
+ "fee_hsk": 0.982342464681,
+ "explorer": "https://hsk.blockscout.com/address/0x78C8476772BC209C3df09Da5e129d0879cd57F8c",
+ "checks": {
+  "runtime == artifact (+immutable)": true,
+  "token() == USDC.e": true,
+  "endpointCount() == 0": true
+ }
+}
