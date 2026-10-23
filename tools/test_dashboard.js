@@ -50,6 +50,16 @@ const T = {
   approval: "0xb79c0c27cf054a9747d7903bf1de53411bd52dc10dd105c69abb53c82c1b61e7",
 };
 const LIVE_SIGS = [T.paid, T.refunded, T.withdrawn, T.paidAuth, T.priceChanged, T.registered];
+const FEED_PROXY = "0x244ce344df8837c9d938867e2ffbf0e4b0169b56";
+const FEED_AGG = "0x86b79c0f9b58ca8fd72da05af3ed4c99c8140c79";
+const T_ANSWER = "0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f";
+const nowS = () => Math.floor(Date.now() / 1000);
+// An AnswerUpdated log of the USDC/USD aggregator in the API v2 item shape.
+function answerLog(answer, round, updatedAt, o = {}) {
+  return { address: { hash: o.address || "0x86B79c0F9B58CA8fd72Da05Af3Ed4c99C8140C79" }, transaction_hash: w("f" + round.toString(16)),
+    topics: [T_ANSWER, o.rawAnswer || w(answer), w(round), null], data: w(updatedAt), block_number: 29197023 + Number(round), index: 0,
+    block_timestamp: new Date(updatedAt * 1000).toISOString() };
+}
 const EXACT = [
   { topic1: w("1"), topic3: w(PROVIDER), topic1_3_opr: "or" },
   { topic1: w("2") },
@@ -60,7 +70,10 @@ const hx = (n) => "0x" + n.toString(16);
 
 // ------------------------------------------------------------------ a fake chain: logs in the API v2 item shape
 class World {
-  constructor() { this.logs = []; this.block = DEPLOY_BLOCK + 260; this.n = 0; this.head = null; }
+  constructor() {
+    this.logs = []; this.block = DEPLOY_BLOCK + 260; this.n = 0; this.head = null;
+    this.feed = { answer: 99982693n, round: 679n, updatedAt: nowS() - 3600, aggregator: FEED_AGG, description: "USDC/USD", decimals: 8 };
+  }
   log(topics, data, o = {}) {
     const block = o.block !== undefined ? o.block : ++this.block;
     if (block > this.block) this.block = block;
@@ -180,6 +193,16 @@ function explorer(x, o = {}) {
         return { jsonrpc: "2.0", id: req.id, result: "0x" + out.map((s) => s.slice(2)).join("") };
       }
       if (sel === "0x75807250") return { jsonrpc: "2.0", id: req.id, result: w(st.credit["0x" + arg.slice(26)] || 0n) };
+      if (call.to.toLowerCase() === FEED_PROXY && x.feed) {
+        const f = x.feed;
+        if (sel === "0x245a7bfc") return { jsonrpc: "2.0", id: req.id, result: w(f.aggregator) };
+        if (sel === "0x313ce567") return { jsonrpc: "2.0", id: req.id, result: w(f.decimals) };
+        if (sel === "0x7284e416") return { jsonrpc: "2.0", id: req.id, result: w(32) + w(f.description.length).slice(2) + Buffer.from(f.description).toString("hex").padEnd(64, "0") };
+        if (sel === "0xfeaf968c") {
+          const rid = (1n << 64n) + f.round;
+          return { jsonrpc: "2.0", id: req.id, result: w(rid) + w(f.answer).slice(2) + w(f.updatedAt).slice(2) + w(f.updatedAt).slice(2) + w(rid).slice(2) };
+        }
+      }
     }
     return { jsonrpc: "2.0", id: req.id, error: { code: -32601, message: "no" } };
   }
@@ -193,6 +216,13 @@ function explorer(x, o = {}) {
       if (o.failV2) return [429, {}];
       const h = x.headBlock();
       return [200, [0, 1, 2, 3].map((i) => ({ height: h - i, timestamp: "2026-10-24T00:00:00.000000Z" }))];
+    }
+    if (p.toLowerCase() === ("/api/v2/addresses/" + FEED_AGG + "/logs")) {
+      calls.feed = (calls.feed || 0) + 1;
+      if (o.failV2 || o.failFeed) return [429, {}];
+      if (u.searchParams.get("topic") !== T_ANSWER) return [200, { items: [], next_page_params: null }];
+      const items = o.feedLogs || (x.feed ? [answerLog(x.feed.answer, x.feed.round, x.feed.updatedAt)] : []);
+      return [200, { items, next_page_params: null }];
     }
     if (p.toLowerCase() === ("/api/v2/addresses/" + CONTRACT + "/logs")) {
       calls.v2.push(u.search);
@@ -286,6 +316,7 @@ async function page(x, o = {}) {
     return { state: t("source-state"), count: t("k-count"), countSub: t("k-count-sub"), paid: t("k-paid"), paidSub: t("k-paid-sub"),
       refund: t("k-refund"), withdrawn: t("k-withdrawn"), withdrawnSub: t("k-withdrawn-sub"), excluded: t("excluded"),
       note: t("partial-note"), noteHidden: byId["partial-note"] ? byId["partial-note"].hidden : true,
+      usd: t("usd-net"), usdSub: t("usd-sub"),
       partialTiles: ["k-count", "k-paid", "k-refund", "k-withdrawn"].filter((id) => byId[id] && byId[id].classList.contains("partial")) };
   };
   const reload = async (o2) => {
@@ -634,6 +665,100 @@ test("snapshot tool refuses when endpoint 1 is not the pinned registration", asy
   assert.notStrictEqual(r.code, 0);
   assert.strictEqual(r.written, null);
   assert.ok(/pinned registration/.test(r.stderr), r.stderr.slice(-300));
+});
+
+// ================================================================== USD value (APRO USDC/USD feed)
+test("USD: feed log parsing (pinned aggregator only, sign, range, age, future)", () => {
+  const now = Date.now(), t = nowS();
+  const ok = A.parseAnswerLog(answerLog(99982693n, 679n, t - 60), now);
+  assert.strictEqual(ok.answer, 99982693n);
+  assert.strictEqual(ok.round, 679n);
+  assert.strictEqual(A.parseAnswerLog(answerLog(99982693n, 679n, t - 60, { address: "0x" + "33".repeat(20) }), now), null, "another address");
+  assert.strictEqual(A.parseAnswerLog(answerLog(0n, 679n, t - 60, { rawAnswer: "0x" + "f".repeat(64) }), now), null, "negative int256");
+  assert.strictEqual(A.parseAnswerLog(answerLog(300000000n, 679n, t - 60), now), null, "3.0 USD: out of range");
+  assert.strictEqual(A.parseAnswerLog(answerLog(99982693n, 679n, t - 27 * 3600), now), null, "older than 26 h");
+  assert.strictEqual(A.parseAnswerLog(answerLog(99982693n, 679n, t + 3600), now), null, "from the future");
+  assert.strictEqual(A.parseAnswerLog(answerLog(99982693n, 0n, t - 60), now), null, "round 0");
+  assert.strictEqual(A.parseAnswerLog({ ...answerLog(99982693n, 679n, t - 60), data: "0x" }, now), null, "no updatedAt");
+  const newest = A.newestAnswer([answerLog(99000000n, 600n, t - 7200), answerLog(99982693n, 679n, t - 60), null, 7], now);
+  assert.strictEqual(newest.round, 679n);
+});
+
+test("USD: formatting and conversion (micro-USD, rounded down)", () => {
+  assert.strictEqual(A.usdOf(135000n, 99982693n), 134976n);
+  assert.strictEqual(A.fmtUsd4(134976n), "$0.1349");
+  assert.strictEqual(A.fmtUsd4(1234567890n), "$1,234.5678");
+  assert.strictEqual(A.fmtPrice(99982693n), "0.99982693");
+  assert.strictEqual(A.fmtPrice(100000000n), "1");
+});
+
+test("USD: page shows the net USD value with the feed's price, round time and link", async () => {
+  const x = addLive(baseWorld());
+  const pg = await page(x, { snapshot: snapshotOf(x, x.snapBlock) });
+  const r = pg.read();
+  assert.ok(r.state.startsWith("Live"), r.state);
+  assert.strictEqual(r.usd, "$0.1349");                       // (170000 - 35000) x 0.99982693
+  assert.ok(r.usdSub.startsWith("$0.1699 paid, $0.0349 refunded at APRO USDC/USD 0.99982693 · round of "), r.usdSub);
+  assert.ok(r.usdSub.endsWith(" · feed 0x244C…9B56"), r.usdSub);
+  assert.ok(!/snapshot/.test(r.usdSub));
+  assert.strictEqual(pg.calls().feed, 1, "one API v2 call for the feed");
+  assert.deepStrictEqual(pg.hosts, [], "no other origin");
+});
+
+test("USD: a stale, out-of-range or foreign feed log is not used", async () => {
+  for (const feedLogs of [[answerLog(99982693n, 679n, nowS() - 30 * 3600)], [answerLog(200000000n, 679n, nowS() - 60)],
+    [answerLog(99982693n, 679n, nowS() - 60, { address: "0x" + "44".repeat(20) })]]) {
+    const x = addLive(baseWorld());
+    const pg = await page(x, { snapshot: snapshotOf(x, x.snapBlock), feedLogs });
+    const r = pg.read();
+    assert.strictEqual(r.count, FULL_EXPECT.count, "payment tiles unaffected");
+    assert.strictEqual(r.usd, "–");
+    assert.ok(/price unavailable/.test(r.usdSub), r.usdSub);
+  }
+});
+
+test("USD: feed API down -> the snapshot's reading is used and labelled", async () => {
+  const x = addLive(baseWorld());
+  const snapshot = { ...snapshotOf(x, x.snapBlock), usdFeed: { pair: "USDC/USD", proxy: "0x244Ce344df8837c9d938867E2Ffbf0E4B0169B56",
+    aggregator: FEED_AGG, decimals: 8, roundId: String((1n << 64n) + 679n), answer: "99982693", updatedAt: nowS() - 7200, block: x.snapBlock } };
+  const pg = await page(x, { snapshot, failFeed: true });
+  const r = pg.read();
+  assert.ok(r.state.startsWith("Live"), r.state);
+  assert.strictEqual(r.usd, "$0.1349");
+  assert.ok(/\(snapshot\)/.test(r.usdSub), r.usdSub);
+  const bad = { ...snapshot, usdFeed: { ...snapshot.usdFeed, proxy: "0x" + "55".repeat(20) } };
+  const pg2 = await page(x, { snapshot: bad, failFeed: true });
+  assert.strictEqual(pg2.read().usd, "–", "a snapshot reading for another proxy is ignored");
+});
+
+test("USD: no USD total from partial payment data", async () => {
+  const x = spam(addLive(baseWorld()), 2100, (x, o) => x.pay(3, 1, { payee: ATTACKER, ...o }));
+  const pg = await page(x, { snapshot: snapshotOf(x, x.snapBlock), failLogs: true });
+  const r = pg.read();
+  assert.strictEqual(r.usd, "–");
+  assert.ok(/needs the full payment totals/.test(r.usdSub), r.usdSub);
+});
+
+test("snapshot tool stores the USDC/USD reading after checking the proxy's aggregator, pair and decimals", async () => {
+  const x = addLive(baseWorld());
+  const r = await runTool(x);
+  assert.strictEqual(r.code, 0, r.stderr);
+  const f = r.written.usdFeed;
+  assert.ok(f, "usdFeed written");
+  assert.deepStrictEqual([f.pair, f.decimals, f.answer, f.roundId, f.aggregator], ["USDC/USD", 8, "99982693", String((1n << 64n) + 679n), FEED_AGG]);
+  assert.ok(A.parseSnapFeed(f, Date.now()), "the page accepts it");
+});
+
+test("snapshot tool: a feed that moved aggregator or reports another pair -> snapshot without usdFeed + warning", async () => {
+  for (const [patch, why] of [[{ aggregator: "0x" + "66".repeat(20) }, /now points at aggregator/], [{ description: "USDT/USD" }, /description mismatch/],
+    [{ updatedAt: nowS() - 30 * 3600 }, /older than 26 h/]]) {
+    const x = addLive(baseWorld());
+    Object.assign(x.feed, patch);
+    const r = await runTool(x);
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert.ok(r.written && r.written.complete && r.written.usdFeed === undefined, "payment snapshot still written, no usdFeed");
+    assert.ok(why.test(r.stderr), r.stderr.slice(-300));
+  }
 });
 
 (async () => {

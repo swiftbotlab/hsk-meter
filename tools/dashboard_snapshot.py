@@ -12,6 +12,11 @@ Nothing is written unless every check passes (exit status 1 otherwise, the old f
 
 The explorer's getLogs API allows about 10 calls per hour per IP without a key; a run needs 3 when nothing overflows.
 
+It also stores the APRO USDC/USD price feed's latestRoundData() at the same block ("usdFeed", the page's fallback for
+the USD value) after checking that the feed proxy still points at the aggregator docs/app.js reads (FEED.aggregator)
+and reports USDC/USD with 8 decimals. If that check or the read fails, the snapshot is written without usdFeed and
+a warning says why (update FEED.aggregator in docs/app.js if the feed moved to a new aggregator).
+
   python3 tools/dashboard_snapshot.py [--out docs/snapshot.json] [--to-block N]
 """
 import argparse
@@ -44,6 +49,13 @@ T_REGISTERED = "0x77dd24cff796128cd07781fd29ca7e3193c52b494cfe6761cffb516a7c989c
 T_PRICE = "0x2bce37c591c5b0d254c3056688b080a088f160fff82b6e79f456c8a20d5570f6"
 SEL_GET_ENDPOINT = "0x937bbc4a"       # getEndpoint(uint256)
 SEL_CREDIT_OF = "0x75807250"          # creditOf(address)
+FEED_PROXY = "0x244ce344df8837c9d938867e2ffbf0e4b0169b56"        # APRO USDC/USD (docs.hskchain.net, Tools > Oracle)
+FEED_AGGREGATOR = "0x86b79c0f9b58ca8fd72da05af3ed4c99c8140c79"   # must equal FEED.aggregator in docs/app.js
+FEED_MAX_AGE_S = 26 * 3600
+SEL_AGGREGATOR = "0x245a7bfc"         # aggregator()
+SEL_DECIMALS = "0x313ce567"           # decimals()
+SEL_DESCRIPTION = "0x7284e416"        # description()
+SEL_LATEST_ROUND = "0xfeaf968c"       # latestRoundData()
 
 WORD = re.compile(r"^0x[0-9a-f]{64}$")
 DATA = re.compile(r"^0x(?:[0-9a-f]{64}){0,16}$")
@@ -87,8 +99,8 @@ def rpc(method, params):
     return body["result"]
 
 
-def eth_call(data, block):
-    out = rpc("eth_call", [{"to": CONTRACT, "data": data}, hex(block)])
+def eth_call(data, block, to=CONTRACT):
+    out = rpc("eth_call", [{"to": to, "data": data}, hex(block)])
     if not isinstance(out, str) or not re.fullmatch(r"0x(?:[0-9a-f]{64})+", out):
         raise Fail("eth_call: unexpected answer")
     return [out[2 + 64 * i:2 + 64 * (i + 1)] for i in range((len(out) - 2) // 64)]
@@ -203,6 +215,28 @@ def check(items, block):
     return out, sorted(payee_endpoints)
 
 
+def usd_feed(block):
+    """The APRO USDC/USD reading at `block` for the page's fallback, after checking the proxy (raises Fail)."""
+    agg = "0x" + eth_call(SEL_AGGREGATOR, block, FEED_PROXY)[0][24:]
+    if agg != FEED_AGGREGATOR:
+        raise Fail(f"the USDC/USD proxy now points at aggregator {agg}; update FEED.aggregator in docs/app.js and "
+                   "FEED_AGGREGATOR here")
+    if int(eth_call(SEL_DECIMALS, block, FEED_PROXY)[0], 16) != 8:
+        raise Fail("USDC/USD feed decimals are not 8")
+    w = eth_call(SEL_DESCRIPTION, block, FEED_PROXY)
+    if len(w) < 3 or int(w[1], 16) != 8 or bytes.fromhex(w[2][:16]) != b"USDC/USD":
+        raise Fail("USDC/USD feed description mismatch")
+    r = eth_call(SEL_LATEST_ROUND, block, FEED_PROXY)
+    if len(r) != 5:
+        raise Fail("latestRoundData: unexpected answer")
+    rid, answer, updated, answered = int(r[0], 16), int(r[1], 16), int(r[3], 16), int(r[4], 16)
+    if not (rid > 0 and answered >= rid and 50_000_000 <= answer <= 150_000_000 and 0 < updated <= time.time() + 300
+            and time.time() - updated <= FEED_MAX_AGE_S):
+        raise Fail("USDC/USD round failed the checks (unfinished, out of range or older than 26 h)")
+    return {"pair": "USDC/USD", "proxy": "0x244Ce344df8837c9d938867E2Ffbf0E4B0169B56", "aggregator": FEED_AGGREGATOR,
+            "decimals": 8, "roundId": str(rid), "answer": str(answer), "updatedAt": updated, "block": block}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "snapshot.json"))
@@ -233,13 +267,17 @@ def main():
     out = {"generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "source": LOGS_API + "?module=logs&action=getLogs",
            "contract": CONTRACT, "fromBlock": DEPLOY_BLOCK, "toBlock": to, "complete": True, "filters": QUERIES,
            "payeeEndpoints": payee_endpoints, "counters": counters, "items": items}
+    try:
+        out["usdFeed"] = usd_feed(to)
+    except (Fail, OSError, ValueError) as e:
+        print(f"warning: snapshot written without usdFeed: {str(e)[:300]}", file=sys.stderr)
     tmp = args.out + ".tmp"
     with open(tmp, "w") as f:
         json.dump(out, f, separators=(",", ":"))
         f.write("\n")
     os.replace(tmp, args.out)
     print(json.dumps({"out": args.out, "items": len(items), "toBlock": to, "generatedAt": out["generatedAt"],
-                      "counters": counters}))
+                      "counters": counters, "usdFeed": out.get("usdFeed")}))
 
 
 if __name__ == "__main__":

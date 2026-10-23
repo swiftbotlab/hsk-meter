@@ -13,6 +13,11 @@
 //   If a type has more pages than the cap, the page asks the explorer's getLogs API with exact filters that only
 //   payments to endpoints 1-2 or our own provider and payee can match. If that fails too (it allows only a few calls
 //   per hour), the affected tiles say "partial data" instead of showing a total.
+// - USD value: the APRO USDC/USD price feed on HashKey Chain (listed on docs.hskchain.net, Tools > Oracle). The page
+//   reads the newest AnswerUpdated event of the feed's aggregator from the same explorer API v2 (its own address, so
+//   only the aggregator can write those logs). tools/dashboard_snapshot.py checks that the feed proxy still points at
+//   that aggregator and stores the proxy's latestRoundData() as the fallback. A round older than 26 h (the feeds'
+//   heartbeat is 24 h), from the future or outside 0.5-1.5 USD is not used.
 "use strict";
 (function () {
   const HOST = "https://hsk.blockscout.com";
@@ -49,6 +54,15 @@
     priceChanged: "0x2bce37c591c5b0d254c3056688b080a088f160fff82b6e79f456c8a20d5570f6",
   };
   const LIVE_TYPES = ["paid", "refunded", "withdrawn", "paidAuth", "priceChanged", "registered"];
+  const FEED = {                   // APRO USDC/USD on HashKey Chain mainnet (8 decimals)
+    pair: "USDC/USD",
+    proxy: "0x244Ce344df8837c9d938867E2Ffbf0E4B0169B56",
+    aggregator: "0x86b79c0f9b58ca8fd72da05af3ed4c99c8140c79",
+  };
+  const T_ANSWER = "0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f";   // AnswerUpdated(int256,uint256,uint256)
+  const FEED_MAX_AGE_S = 26 * 3600;
+  const FEED_MIN = 50000000n, FEED_MAX = 150000000n;   // 0.5 .. 1.5 USD
+  const FEED_REFRESH_MS = 300000;
   const RE_WORD = /^0x[0-9a-f]{64}$/;
   const RE_DATA = /^0x(?:[0-9a-f]{64})*$/;
   const RE_TX = /^0x[0-9a-f]{64}$/;
@@ -91,6 +105,15 @@
     if (frac.length < 2) frac = frac.padEnd(2, "0");
     return (neg ? "-" : "") + whole.toLocaleString("en-US") + "." + frac;
   }
+  function fmtUsd4(micro) {       // BigInt micro-USD -> "$0.1349" (rounded down to 4 decimals)
+    const v = micro < 0n ? 0n : micro;
+    return "$" + (v / 1000000n).toLocaleString("en-US") + "." + ((v % 1000000n) / 100n).toString().padStart(4, "0");
+  }
+  function fmtPrice(answer) {     // BigInt with 8 decimals -> "0.99982693"
+    const frac = (answer % 100000000n).toString().padStart(8, "0").replace(/0+$/, "");
+    return (answer / 100000000n).toString() + (frac ? "." + frac : "");
+  }
+  const usdOf = (units, answer) => (units * answer) / 100000000n;   // USDC.e units (6 dec) -> micro-USD
   const short = (h) => h.slice(0, 6) + "…" + h.slice(-4);
   const dayKey = (ms) => new Date(ms).toISOString().slice(0, 10);
   const fmtDay = (key) => new Date(key + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
@@ -164,6 +187,43 @@
       case T.registered: return n === 4 && len >= 2 + 64 && topicAddr(t[3]) === PAYEE ? "registered" : null;
       default: return null;
     }
+  }
+
+  // ------------------------------------------------------------------ USD price feed
+  // A feed reading {answer, round, updatedAt (s), fromSnapshot} after the checks above, or null.
+  function feedOk(answer, round, updatedAt, nowMs) {
+    if (typeof answer !== "bigint" || answer < FEED_MIN || answer > FEED_MAX) return false;
+    if (!Number.isSafeInteger(updatedAt) || updatedAt <= 0 || updatedAt * 1000 > nowMs + 300000) return false;
+    return nowMs - updatedAt * 1000 <= FEED_MAX_AGE_S * 1000 && round > 0n;
+  }
+  function parseAnswerLog(raw, nowMs) {
+    if (!raw || typeof raw !== "object") return null;
+    const addr = raw.address && typeof raw.address === "object" ? raw.address.hash : raw.address;
+    if (typeof addr !== "string" || addr.toLowerCase() !== FEED.aggregator) return null;
+    if (!Array.isArray(raw.topics)) return null;
+    const t = raw.topics.filter((x) => x !== null).map((x) => (typeof x === "string" ? x.toLowerCase() : ""));
+    const data = typeof raw.data === "string" ? raw.data.toLowerCase() : "";
+    if (t.length !== 3 || t[0] !== T_ANSWER || !RE_WORD.test(t[1]) || !RE_WORD.test(t[2]) || !/^0x[0-9a-f]{64}$/.test(data)) return null;
+    if (parseInt(t[1].slice(2, 3), 16) >= 8) return null;          // int256 with the sign bit set: negative
+    const answer = BigInt(t[1]), round = BigInt(t[2]), up = BigInt(data);
+    if (up > 4102444800n) return null;
+    const updatedAt = Number(up);
+    return feedOk(answer, round, updatedAt, nowMs) ? { answer, round, updatedAt, fromSnapshot: false } : null;
+  }
+  function newestAnswer(items, nowMs) {
+    let best = null;
+    for (const raw of items || []) {
+      const r = parseAnswerLog(raw, nowMs);
+      if (r && (!best || r.updatedAt > best.updatedAt)) best = r;
+    }
+    return best;
+  }
+  function parseSnapFeed(f, nowMs) {
+    if (!f || typeof f !== "object" || f.pair !== FEED.pair || typeof f.proxy !== "string" ||
+        f.proxy.toLowerCase() !== FEED.proxy.toLowerCase() || f.decimals !== 8) return null;
+    if (typeof f.answer !== "string" || !/^[0-9]{1,20}$/.test(f.answer) || typeof f.roundId !== "string" || !/^[0-9]{1,30}$/.test(f.roundId)) return null;
+    const answer = BigInt(f.answer), round = BigInt(f.roundId);
+    return feedOk(answer, round, f.updatedAt, nowMs) ? { answer, round, updatedAt: f.updatedAt, fromSnapshot: true } : null;
   }
 
   // ------------------------------------------------------------------ fetch
@@ -257,13 +317,21 @@
     if (!body || !Array.isArray(body.items) || body.complete !== true || !Number.isSafeInteger(body.toBlock) ||
         body.toBlock < DEPLOY_BLOCK || !Number.isSafeInteger(body.fromBlock) || body.fromBlock > DEPLOY_BLOCK) throw new Error("bad snapshot");
     const at = Date.parse(body.generatedAt);
-    return { items: body.items, toBlock: body.toBlock, at: Number.isFinite(at) ? at : null };
+    return { items: body.items, toBlock: body.toBlock, at: Number.isFinite(at) ? at : null, usdFeed: body.usdFeed || null };
+  }
+
+  // The newest AnswerUpdated log of the feed's aggregator (first page of the API v2, newest first), or null.
+  async function fetchFeed() {
+    const q = new URLSearchParams({ topic: T_ANSWER });
+    const body = await fetchJson(API_V2 + "/addresses/" + FEED.aggregator + "/logs?" + q.toString(), 15000);
+    if (!body || !Array.isArray(body.items)) throw new Error("unexpected API answer");
+    return newestAnswer(body.items.slice(0, 50), Date.now());
   }
 
   // ------------------------------------------------------------------ the page's log store
   // items: every counted log seen (key tx:index). cover[type]: every log of that type up to this block is in items.
   function newStore(snap) {
-    const s = { items: new Map(), cover: {}, snapshot: !!snap, snapshotAt: snap ? snap.at : null };
+    const s = { items: new Map(), cover: {}, snapshot: !!snap, snapshotAt: snap ? snap.at : null, snapFeed: snap ? snap.usdFeed : null };
     for (const t of LIVE_TYPES) s.cover[t] = snap ? snap.toBlock : DEPLOY_BLOCK - 1;
     if (snap) addItems(s, snap.items);
     return s;
@@ -396,6 +464,31 @@
       setTile("k-withdrawn", PARTIAL, true);
       $("k-withdrawn-sub").textContent = "payee-wide, all its endpoints";
     }
+  }
+
+  // ------------------------------------------------------------------ render: USD value
+  function renderUsd(a, cov, feed) {
+    const sub = $("usd-sub");
+    sub.textContent = "";
+    if (!(cov.paid && cov.refunded)) {
+      setTile("usd-net", "–");
+      sub.textContent = "needs the full payment totals";
+      return;
+    }
+    if (!feed) {
+      setTile("usd-net", "–");
+      sub.textContent = "APRO " + FEED.pair + " price unavailable right now";
+      return;
+    }
+    const paid = a.payments.reduce((s, p) => s + p.amount, 0n);
+    const refunded = a.refunds.reduce((s, r) => s + r.amount, 0n);
+    setTile("usd-net", fmtUsd4(usdOf(paid - refunded, feed.answer)));
+    const link = el("a", "mono", short(FEED.proxy));
+    link.href = EXPLORER + "/address/" + FEED.proxy;
+    link.target = "_blank"; link.rel = "noopener"; link.title = FEED.proxy;
+    sub.append(fmtUsd4(usdOf(paid, feed.answer)) + " paid, " + fmtUsd4(usdOf(refunded, feed.answer)) + " refunded at APRO " +
+      FEED.pair + " " + fmtPrice(feed.answer) + " · round of " + fmtTime(feed.updatedAt * 1000) +
+      (feed.fromSnapshot ? " (snapshot)" : "") + " · feed ", link);
   }
 
   // ------------------------------------------------------------------ render: per-day chart
@@ -597,15 +690,28 @@
   }
 
   // ------------------------------------------------------------------ main loop
-  let busy = false, lastAgg = null, lastLiveAt = 0, store = null;
+  let busy = false, lastAgg = null, lastLiveAt = 0, store = null, liveFeed = null, feedAt = 0;
   function setState(text, warn) {
     const s = $("source-state");
     s.textContent = text;
     s.classList.toggle("warn", !!warn);
   }
+  function currentFeed() {
+    if (liveFeed && feedOk(liveFeed.answer, liveFeed.round, liveFeed.updatedAt, Date.now())) return liveFeed;
+    return store ? parseSnapFeed(store.snapFeed, Date.now()) : null;
+  }
+  async function refreshFeed() {     // never throws; a failure keeps the last reading (it ages out after 26 h)
+    if (Date.now() - feedAt < FEED_REFRESH_MS) return;
+    try {
+      const f = await fetchFeed();
+      feedAt = Date.now();
+      if (f) liveFeed = f;
+    } catch (e) { /* unavailable: currentFeed() falls back to the snapshot's reading */ }
+  }
   function renderAll(a, cov) {
     lastAgg = a;
     renderTiles(a, cov);
+    renderUsd(a, cov, currentFeed());
     const rows = dayRows(a);
     renderChart(rows);
     renderDayTable(rows);
@@ -626,15 +732,18 @@
     document.body.classList.add("busy");
     $("refresh").disabled = true;
     let s = null;
+    const feedP = refreshFeed();
     try {
       s = await ensureStore();
       const cov = await refreshLive(s);
+      await feedP;
       renderAll(aggregate([...s.items.values()]), cov);
       lastLiveAt = Date.now();
       const partial = LIVE_TYPES.some((t) => !cov[t]);
       const now = new Date(lastLiveAt).toISOString().slice(11, 19);
       setState(partial ? "Partial data · hsk.blockscout.com · updated " + now + " UTC" : "Live · hsk.blockscout.com · updated " + now + " UTC", partial);
     } catch (e) {
+      await feedP;
       if (lastLiveAt) {
         setState("Refresh failed; showing data from " + fmtTime(lastLiveAt), true);
       } else if (s && s.snapshot) {
@@ -652,7 +761,8 @@
 
   if (typeof window === "undefined") {          // loaded by tools/test_dashboard.js (Node): export the pure parts only
     module.exports = { aggregate, classify, cleanItem, fromRpcLog, dayRows, fmtUsd, decimalsFor, niceStep, T, PROVIDER, PAYEE,
-      CONTRACT, DEPLOY_BLOCK, ENDPOINTS, EXACT_QUERIES, LIVE_TYPES, MAX_V2_PAGES };
+      CONTRACT, DEPLOY_BLOCK, ENDPOINTS, EXACT_QUERIES, LIVE_TYPES, MAX_V2_PAGES, FEED, T_ANSWER, parseAnswerLog, newestAnswer,
+      parseSnapFeed, usdOf, fmtUsd4, fmtPrice };
     return;
   }
   let resizeTimer = null;

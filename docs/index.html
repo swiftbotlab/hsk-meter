@@ -8,8 +8,8 @@
 <meta name="description" content="Live per-request payments between agents on HashKey Chain mainnet: USDC.e paid, refunds and withdrawals of the HSK Meter settlement contract.">
 <title>HSK Meter Live</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a78d6'/%3E%3Cpath d='M8 22V10h3v5h4v-5h3v12h-3v-4h-4v4z' fill='%23fff'/%3E%3Crect x='20' y='15' width='4' height='7' rx='1' fill='%23fff'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="style.css?v=3">
-<script src="app.js?v=3" defer></script>
+<link rel="stylesheet" href="style.css?v=4">
+<script src="app.js?v=4" defer></script>
 </head>
 <body>
 <main class="wrap">
@@ -46,6 +46,11 @@
       <p class="tile-value" id="k-withdrawn">–</p>
       <p class="tile-sub" id="k-withdrawn-sub">&nbsp;</p>
     </div>
+  </section>
+  <section class="usd" aria-labelledby="usd-h">
+    <h2 id="usd-h" class="usd-label">Net value in USD</h2>
+    <p class="usd-value" id="usd-net">–</p>
+    <p class="usd-sub" id="usd-sub">Priced with the APRO USDC/USD feed on HashKey Chain</p>
   </section>
   <p id="partial-note" class="partial-note" role="status" hidden></p>
 
@@ -98,6 +103,8 @@
       <dd><a href="https://hsk.blockscout.com/token/0x054ed45810DbBAb8B27668922D110669c9D88D0a" target="_blank" rel="noopener">USDC.e</a>, 6 decimals</dd>
       <dt>Network</dt>
       <dd>HashKey Chain mainnet, chain id 177</dd>
+      <dt>USD price</dt>
+      <dd><a href="https://hsk.blockscout.com/address/0x244Ce344df8837c9d938867E2Ffbf0E4B0169B56" target="_blank" rel="noopener">APRO USDC/USD</a> feed, 8 decimals</dd>
     </dl>
   </section>
 
