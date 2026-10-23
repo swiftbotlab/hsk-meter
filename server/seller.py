@@ -814,7 +814,29 @@ class Seller:
                         f.write(json.dumps({"alert": "provider_low_balance", "t": int(time.time()), **detail}) + "\n")
                 except OSError:
                     pass
+        if not low and self.cfg.get("state_dir"):
+            self.clear_alert_file(bal, threshold)
         self.low_balance = low
+
+    def clear_alert_file(self, bal, threshold):
+        """Remove a low-balance ALERT file (also one left by an earlier run) once the balance is back above threshold."""
+        path = os.path.join(self.cfg["state_dir"], "ALERT")
+        try:
+            if os.path.islink(path) or not os.path.isfile(path):
+                return
+            with open(path) as f:
+                kind = json.loads(f.read(4096) or "{}").get("alert")
+        except (OSError, ValueError, AttributeError):
+            return
+        if kind != "provider_low_balance":
+            return
+        try:
+            os.unlink(path)
+        except OSError:
+            return
+        detail = {"balanceHSK": round(bal / 1e18, 6), "thresholdHSK": round(threshold / 1e18, 6)}
+        self.state.record("alert", kind="provider_balance_ok", detail=detail)
+        print(json.dumps({"alert_cleared": "provider_low_balance", **detail}), flush=True)
 
     def info(self):
         eps = {}

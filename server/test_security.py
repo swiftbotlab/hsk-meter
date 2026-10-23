@@ -262,6 +262,29 @@ class F2GasDrain(unittest.TestCase):
             self.assertTrue(env.s.low_balance)
             self.assertEqual(env.s.state.alerts[-1]["kind"], "provider_low_balance")
             self.assertTrue(os.path.exists(os.path.join(d, "ALERT")))
+            env.ch.native[env.ch.provider] = 6 * 10**18             # topped up above the threshold
+            env.s.check_balance()
+            self.assertFalse(env.s.low_balance)
+            self.assertFalse(os.path.exists(os.path.join(d, "ALERT")), "alert clears once the balance is back")
+            self.assertEqual(env.s.state.alerts[-1]["kind"], "provider_balance_ok")
+        finally:
+            shutil.rmtree(d)
+
+    def test_stale_alert_file_cleared_at_start(self):
+        base = os.path.join(os.path.dirname(HERE), "tmp")
+        d = tempfile.mkdtemp(dir=base) if os.path.isdir(base) else tempfile.mkdtemp()
+        try:
+            with open(os.path.join(d, "ALERT"), "w") as f:      # left by an earlier run
+                f.write('{"alert": "provider_low_balance"}\n')
+            with open(os.path.join(d, "OTHER"), "w") as f:
+                f.write("x")
+            env = Env(state_dir=d)                                 # 10 HSK: healthy
+            env.s.check_balance()
+            self.assertFalse(os.path.exists(os.path.join(d, "ALERT")))
+            self.assertTrue(os.path.exists(os.path.join(d, "OTHER")), "only the ALERT file is touched")
+            os.symlink(os.path.join(d, "OTHER"), os.path.join(d, "ALERT"))
+            env.s.check_balance()
+            self.assertTrue(os.path.exists(os.path.join(d, "OTHER")), "a symlinked ALERT is never followed")
         finally:
             shutil.rmtree(d)
 
