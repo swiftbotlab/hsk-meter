@@ -2,7 +2,7 @@
 """Tests for protocol.py / hsp_draft.py / seller pieces. Offline by default; --online adds read-only checks against
 the deployed contract on HashKey Chain (eth_call only: nothing is sent).
 
-  test_protocol.py [-v] [--online]
+  test_protocol.py [-v] [--online]      (--online needs HSK_METER_BUYER_KEY_FILE: a file with HKPW_BUYER_PK=...)
 """
 import json
 import os
@@ -25,6 +25,16 @@ ONLINE = "--online" in sys.argv
 if ONLINE:
     sys.argv.remove("--online")
 ROOT = os.path.dirname(HERE)
+
+
+def load_var(path, var):
+    with open(path) as f:
+        for line in f:
+            if line.startswith(var + "="):
+                return line.strip().split("=", 1)[1]
+    raise KeyError(var)
+
+
 VEC = {"domain": "0x4cc9139c98107575051bd6bb5f66ae90d3ff9e3e996f1cb12aa95e7d624e0d64",
        "digest": "0x63cb1cdf9b0be81256dc25fadf023a41de8b27b5ce67d3960506edb07d765c95",
        "rid": "0x2222222222222222222222222222222222222222ce67d3960506edb07d765c95"}
@@ -82,7 +92,8 @@ class Offline(unittest.TestCase):
                 P.parse_b64json(bad)
 
     def _payload(self, **over):
-        p = {"x402Version": 2, "accepted": {"scheme": "exact", "network": P.NETWORK,
+        p = {"x402Version": 2, "accepted": {"scheme": "exact", "network": P.NETWORK, "amount": "10000",
+                                             "payTo": "0x" + "66" * 20, "asset": P.USDCE,
                                              "extra": {"endpointId": "1", "requestId": "0x" + "11" * 32, "token": "0x" + "22" * 32,
                                                        "nonce": "0x" + "33" * 32, "resource": "GET /x"}},
              "payload": {"signature": "0x" + "44" * 65, "authorization": {"from": "0x" + "55" * 20, "to": "0x" + "66" * 20,
@@ -106,7 +117,8 @@ class Offline(unittest.TestCase):
                {"payload.signature": "0x1234"}, {"payload.authorization.value": 10000}, {"payload.authorization.value": "-1"},
                {"payload.authorization.value": "1" * 40}, {"payload.authorization.from": "0xzz"},
                {"payload.authorization.nonce": "0x12"}, {"accepted.extra.endpointId": "01"}, {"accepted.extra": None},
-               {"extensions": "x"}]
+               {"extensions": "x"}, {"accepted.amount": "\u00b2"}, {"accepted.amount": 10000}, {"accepted.amount": None},
+               {"accepted.payTo": ["x"]}, {"accepted.asset": None}, {"accepted.extra.endpointId": "\u00b2"}]
         for b in bad:
             with self.assertRaises(P.ProtocolError, msg=str(b)):
                 P.validate_payment_payload(self._payload(**b))
@@ -191,8 +203,10 @@ class Online(unittest.TestCase):
         with open(os.path.join(ROOT, "ops", "state", "addresses.json")) as f:
             addrs = json.load(f)
         cls.provider = addrs["provider"]
-        env = S._read_env("secrets/hashkey_paywall_keys.env")
-        cls.buyer = Account.from_key(env["HKPW_BUYER_PK"])
+        kf = os.environ.get("HSK_METER_BUYER_KEY_FILE")
+        if not kf:
+            raise unittest.SkipTest("set HSK_METER_BUYER_KEY_FILE")
+        cls.buyer = Account.from_key(load_var(kf, "HKPW_BUYER_PK"))
 
     def test_nonce_matches_contract(self):
         rid = P.compute_request_id(177, self.c.lower(), 1, self.buyer.address.lower(), "GET /t", "0x" + "77" * 32)[1]

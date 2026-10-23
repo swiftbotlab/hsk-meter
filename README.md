@@ -15,7 +15,14 @@ By Swift Bot Labs. Built for the HashKey Chain Horizon Hackathon (India), track 
 | Source verification | Blockscout (full match) and [Sourcify](https://repo.sourcify.dev/177/0x78C8476772BC209C3df09Da5e129d0879cd57F8c) (exact match, creation + runtime) |
 | Settlement token | USDC.e [`0x054ed45810DbBAb8B27668922D110669c9D88D0a`](https://hsk.blockscout.com/token/0x054ed45810DbBAb8B27668922D110669c9D88D0a) (Circle FiatTokenV2_2, EIP-3009) |
 
-Real paid requests, all made over HTTP through the seller in this repo:
+Prices (set on-chain per endpoint): address profile **0.03 USDC.e**, transaction check **0.025 USDC.e**. Each price
+covers at least twice the worst settlement gas we have measured (246,503 gas at 500 gwei = 0.123 HSK, about $0.011),
+because the seller pays the gas of every `exact` settlement. Price changes:
+[`0x62188d0a…`](https://hsk.blockscout.com/tx/0x62188d0abc975d81fd2212ea2197dd2d990fd2be3a168a48b7ba995a58980ef4) and
+[`0x86e73f35…`](https://hsk.blockscout.com/tx/0x86e73f35a5ebb00efc93b8cc449838b812ec601ccb336e904c99530832b6576c).
+
+Real paid requests, all made over HTTP through the seller in this repo (1-5 with v0.1 at the launch prices, 6-8 with
+the hardened v0.2 running in its sandbox):
 
 | # | Request | Payment path | Transaction |
 |---|---|---|---|
@@ -24,6 +31,12 @@ Real paid requests, all made over HTTP through the seller in this repo:
 | 3 | tx check of a hash that does not exist, 0.005 | x402 `exact`, then automatic **refund** | paid [`0x63d7f42d…`](https://hsk.blockscout.com/tx/0x63d7f42d638b79fb1a16404ca025a1524c6c635f601c6f99d8c0df611f4a0f52), refunded [`0xaa744ebd…`](https://hsk.blockscout.com/tx/0xaa744ebdacf908b511dd5e23cc592cd49c55e9f466012a0b26e3388e909c40fc) |
 | 4 | address profile, 0.01 | buyer calls `pay()` itself, proves it with the tx hash | [`0xfb36cf54…`](https://hsk.blockscout.com/tx/0xfb36cf54ef11efccca707b465ac9ff95dda1f075eab59136485369ce76783856) |
 | 5 | tx check, 0.005 | x402 `exact`; same header replayed 3 more times: served 3x, settled once, then refused | [`0x04ddbc59…`](https://hsk.blockscout.com/tx/0x04ddbc5973a69cd5620f3eb516b6ddbc6be2be4630efeda507fa3ca0c181917e) |
+| 6 | address profile, 0.03 | x402 `exact` + HSP-draft mandate, verifier ACCEPT, adapter pinned | [`0x5bf9515b…`](https://hsk.blockscout.com/tx/0x5bf9515b09692b156cfbe080b451ab0a8a74e2a2e41e2bb8d93aecc0f770a7c9) |
+| 7 | tx check, 0.025 | x402 `exact` | [`0x3a88578a…`](https://hsk.blockscout.com/tx/0x3a88578a594d3e16d493c68fd168e20e0a750d92ce16bd7f216721877f7147ca) |
+| 8 | address profile, 0.03 | x402 `exact`; delivery failed (operator test switch), automatic **refund** | paid [`0x543e14fb…`](https://hsk.blockscout.com/tx/0x543e14fbf0aa9e15932405e70df912bca1d0b1da40be8b33ad1d4b88e557f9b5), refunded [`0xd6e4e725…`](https://hsk.blockscout.com/tx/0xd6e4e7257aa7a472566dc0a27712b58a23b556a9ddb39e93504f582707fdfb0c) |
+
+Since v0.2 a transaction check for a hash that is not on chain is answered with a free `404` before any payment (row 3
+shows the v0.1 behaviour); refunds now cover deliveries that fail after settlement.
 
 Deployment [`0xe08891e3…`](https://hsk.blockscout.com/tx/0xe08891e35a7197a62a5cb165a6e2dea194842f3dba00711fc65207cec120fe73),
 endpoint registrations [`0xec7dd370…`](https://hsk.blockscout.com/tx/0xec7dd370d753d746a264e3bd13acdca1733b323132e5cbe5184a573ec56f27b4)
@@ -41,7 +54,9 @@ buyer                                   seller (server/seller.py)               
   | signs ReceiveWithAuthorization          |                                               |
   | (USDC.e, to = contract, value = price,  |                                               |
   |  nonce = authorizationNonce(id, rid))   |                                               |
-  | GET again + PAYMENT-SIGNATURE --------->| checks everything, simulates, then            |
+  | GET again + PAYMENT-SIGNATURE --------->| checks the signature locally, the payer        |
+  |                                         | on-chain (plain account, balance, unused       |
+  |                                         | nonce), simulates the exact transaction, then  |
   |                                         | payWithAuthorization(...) ------------------->| Paid event, payee credited
   |                                         | reads the Paid event, does the paid work       |
   |<-- 200 + data + PAYMENT-RESPONSE -------|  (no result? refund(requestId) on-chain) ---->| Refunded event
@@ -98,17 +113,23 @@ Not yet (marked `TODO(hsp-...)` in the code):
 |---|---|
 | `contracts/` | Foundry project: `src/HskPayPerRequest.sol`, unit + fuzz tests, model-based invariant suite, gas test |
 | `contracts/test/fixtures/` | runtime code of USDC.e's implementation and its signature library, read from HashKey Chain (hash-pinned) |
-| `server/` | `seller.py` (x402 v2 seller + settlement + refunds), `protocol.py`, `chain.py`, `hsp_draft.py`, tests |
-| `agent/buyer.py` | the paying client with a spend guard; verifies every claim on-chain |
+| `contracts/DEPENDENCIES.md` | provenance of the vendored OpenZeppelin 5.1.0 and forge-std v1.16.2 (`verify_deps.sh` re-checks them) |
+| `server/` | `seller.py` (x402 v2 seller + settlement + refunds), `protocol.py`, `chain.py`, `hsp_draft.py`, `state.py` (journal), `egress.py` (egress guard) |
+| `server/test_*.py`, `server/testkit.py` | protocol tests, security regression tests (offline chain model), live hostile-input tests |
+| `agent/buyer.py` | the paying client with a spend guard (pinned provider and payee, cap reserved before signing); verifies every claim on-chain |
+| `deploy/` | `run_sandboxed.sh` (bubblewrap sandbox for the seller) and `sandbox_probe.py` (what the sandbox can reach) |
 | `ops/state/` | the mainnet deployment record and the public addresses of the demo roles (provider, payee, buyer) |
 
 ## Run the tests
 
 ```sh
-cd contracts && forge test            # 53 unit/fuzz tests, 6 invariants (256 runs x 200 calls), gas report
+pip install -r requirements.txt       # pinned: eth-account, eth-abi, eth-utils
+cd contracts && forge test            # 55 tests in 3 suites: unit + fuzz, gas, model-based invariants (256 runs x 200 calls)
 python3 server/test_protocol.py       # protocol, typed data, HSP draft verifier, payload validation (12 offline)
-python3 server/test_protocol.py --online   # + read-only checks against the deployed contract
-python3 server/test_live.py           # hostile-input tests against a running seller (nothing is paid)
+python3 server/test_security.py       # 38 security regression tests against an offline chain model (no network)
+python3 agent/test_buyer.py           # the buyer's spend guard (7 tests)
+HSK_METER_BUYER_KEY_FILE=... python3 server/test_protocol.py --online   # + read-only checks against the contract
+HSK_METER_BUYER_KEY_FILE=... python3 server/test_live.py   # hostile-input tests against a running seller (nothing is paid)
 ```
 
 The contract tests run against the **real** USDC.e implementation code (`FiatTokenV2_2`) loaded from fixtures, so token
@@ -117,9 +138,20 @@ the contract) was killed by the unit suite.
 
 ## Run the seller and pay with the buyer
 
+The seller reads its keys from a directory with three files, one value each, mode 0600: `provider.env`
+(`HKPW_PROVIDER_PK`), `adapter.env` (`HKPW_ADAPTER_PK`) and `token.env` (`PAYWALL_TOKEN_KEY`, 32 random bytes in hex).
+It keeps its journal in a state directory (default `./run`).
+
 ```sh
-python3 server/seller.py --port 8402            # reads the provider key from a local key file at start
-python3 agent/buyer.py "http://127.0.0.1:8402/v1/hsk/address-profile?address=0x78C8476772BC209C3df09Da5e129d0879cd57F8c" --hsp --pin-adapter 0x4D281e0a98fD40Bb824F88D5e037bd8d03C4403a
+# in a bubblewrap sandbox (recommended): only server/, the venv, the key dir (read-only) and the state dir are visible
+HSK_METER_KEY_DIR=/path/to/keys HSK_METER_VENV=/path/to/venv deploy/run_sandboxed.sh seller --port 8402
+# or directly
+python3 server/seller.py --key-dir /path/to/keys --port 8402
+
+python3 agent/buyer.py "http://127.0.0.1:8402/v1/hsk/address-profile?address=0x78C8476772BC209C3df09Da5e129d0879cd57F8c" \
+  --key-file /path/to/buyer.env \
+  --expect-provider 0x30CCc6d816854d1a66fBfecE15b1515a3E941160 --expect-payee 0xA8A49A6Ca872D54a8FD5FB121139De9bff62a48D \
+  --hsp --pin-adapter 0x4D281e0a98fD40Bb824F88D5e037bd8d03C4403a
 ```
 
 Security notes: [SECURITY.md](SECURITY.md).

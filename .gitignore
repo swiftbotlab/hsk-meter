@@ -7,5 +7,7 @@ ops/state/buyer_session.json
 *.bak-*
 # internal operator notes and scripts (funding, local key handling) stay out of the repository
 STATUS.md
+REVIEW.md
 ops/*.py
 ops/state/*.jsonl
+run/

@@ -11,6 +11,8 @@ import json
 import re
 
 from eth_abi import encode
+from eth_account import Account
+from eth_account.messages import encode_typed_data
 from eth_utils import keccak, to_checksum_address
 
 DOMAIN_TAG = "hsk-paywall/v1"
@@ -29,6 +31,7 @@ SIG_RE = re.compile(r"^0x[0-9a-fA-F]{130}$")          # 65-byte r||s||v (EOA)
 UINT_RE = re.compile(r"^(0|[1-9][0-9]{0,77})$")
 MAX_HEADER_B64 = 8192                                  # PAYMENT-SIGNATURE cap (chars)
 MAX_JSON = 6144
+SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 
 
 class ProtocolError(ValueError):
@@ -88,6 +91,24 @@ def receive_auth_typed_data(frm, to, value, valid_after, valid_before, nonce, ch
                     "validAfter": int(valid_after), "validBefore": int(valid_before),
                     "nonce": bytes.fromhex(nonce[2:])},
     }
+
+
+def recover_receive_auth(au, signature, chain_id=CHAIN_ID, token=USDCE):
+    """Signer of an EIP-3009 ReceiveWithAuthorization, computed locally (no RPC), or None when the signature could
+    never pass FiatTokenV2_2's EOA check (65 bytes, v in {27, 28}, s in the lower half of the curve order).
+    `au` is the validated authorization dict (from, to, value, validAfter, validBefore as ints, nonce as 0x-hex)."""
+    if not isinstance(signature, str) or not SIG_RE.match(signature):
+        return None
+    raw = bytes.fromhex(signature[2:])
+    s, v = int.from_bytes(raw[32:64], "big"), raw[64]
+    if v not in (27, 28) or not (0 < s <= SECP256K1_N // 2):
+        return None
+    try:
+        td = receive_auth_typed_data(au["from"], au["to"], au["value"], au["validAfter"], au["validBefore"], au["nonce"],
+                                     chain_id=chain_id, token=token)
+        return Account.recover_message(encode_typed_data(full_message=td), signature=raw).lower()
+    except Exception:  # malformed point etc.: never a valid signature
+        return None
 
 
 # ------------------------------------------------------------------ x402 v2 envelopes
@@ -160,6 +181,10 @@ def validate_payment_payload(obj):
     acc = obj.get("accepted")
     _need(isinstance(acc, dict), "accepted requirements missing")
     _need(acc.get("scheme") == "exact" and acc.get("network") == NETWORK, "only scheme exact on eip155:177")
+    amt = acc.get("amount")
+    _need(isinstance(amt, str) and UINT_RE.match(amt) is not None and len(amt) <= 30, "accepted.amount must be a decimal string")
+    for k in ("payTo", "asset"):
+        _need(isinstance(acc.get(k), str) and ADDR_RE.match(acc[k]) is not None, f"accepted.{k} must be an address")
     extra = acc.get("extra")
     _need(isinstance(extra, dict), "accepted.extra missing")
     for k in ("endpointId", "requestId", "token", "nonce", "resource"):

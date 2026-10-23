@@ -69,7 +69,25 @@ def caps_string(caps):
 
 
 def caps_list(s):
-    return [c for c in s.split(",") if c] if s else []
+    if not s:
+        return []
+    if not isinstance(s, str) or len(s) > 400:
+        raise ValueError("capabilities must be a comma-separated string (<= 400 chars)")
+    return [c for c in s.split(",") if c]
+
+
+_ADDR = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_B32 = re.compile(r"^0x[0-9a-fA-F]{64}$")
+_UINT = re.compile(r"^(0|[1-9][0-9]{0,29})$")
+
+
+def _field(j, k, pattern):
+    v = j.get(k)
+    if isinstance(v, int) and not isinstance(v, bool) and pattern is _UINT:
+        v = str(v)
+    if not isinstance(v, str) or not pattern.match(v):
+        raise ValueError(f"mandate.{k} is malformed")
+    return v
 
 
 def _typed(types, primary, message, chain_id):
@@ -89,11 +107,12 @@ def mandate_to_json(m):
 
 
 def mandate_from_json(j):
+    """Strict parse of a JSON mandate (every field type- and pattern-checked; raises ValueError only)."""
     if not isinstance(j, dict):
         raise ValueError("mandate must be an object")
-    return mandate_message(payer=j["payer"], payee=j["payee"], token=j["token"], amount=int(j["amount"]),
-                           reference=j["reference"], required_caps=caps_list(j["requiredCapabilities"]),
-                           deadline=int(j["deadline"]))
+    return mandate_message(payer=_field(j, "payer", _ADDR), payee=_field(j, "payee", _ADDR), token=_field(j, "token", _ADDR),
+                           amount=int(_field(j, "amount", _UINT)), reference=_field(j, "reference", _B32),
+                           required_caps=caps_list(j.get("requiredCapabilities")), deadline=int(_field(j, "deadline", _UINT)))
 
 
 def mandate_hash(m, chain_id):

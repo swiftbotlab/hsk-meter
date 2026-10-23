@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Hostile-input tests against a RUNNING seller (default http://127.0.0.1:8402). Every case except `--spend` is refused
-before any settlement, so nothing is paid. --spend adds one real 0.005 USDC.e payment and replays its header to prove
+before any settlement, so nothing is paid. --spend adds one real tx-receipt payment and replays its header to prove
 the serve cap (3) and that a replay never settles twice.
 
-  test_live.py [--base URL] [--spend]
+  test_live.py [--base URL] [--spend]       (needs HSK_METER_BUYER_KEY_FILE: a file with HKPW_BUYER_PK=0x...)
 """
 import json
 import os
@@ -28,13 +28,11 @@ if "--base" in sys.argv:
     del sys.argv[sys.argv.index("--base"):sys.argv.index("--base") + 2]
 if SPEND:
     sys.argv.remove("--spend")
-ENV = {}
-with open("secrets/hashkey_paywall_keys.env") as f:
-    for line in f:
-        if "=" in line and not line.startswith("#"):
-            k, v = line.strip().split("=", 1)
-            ENV[k] = v
-BUYER = Account.from_key(ENV["HKPW_BUYER_PK"])
+KEY_FILE = os.environ.get("HSK_METER_BUYER_KEY_FILE")
+if not KEY_FILE:
+    sys.exit("set HSK_METER_BUYER_KEY_FILE (a file with HKPW_BUYER_PK=0x...)")
+with open(KEY_FILE) as f:
+    BUYER = Account.from_key(next(line.strip().split("=", 1)[1] for line in f if line.startswith("HKPW_BUYER_PK=")))
 PROFILE = "/v1/hsk/address-profile?address=0x0000000000000000000000000000000000000001"
 TXR = "/v1/hsk/tx-receipt?hash=0x98526a6b276b3763cde68297c29f89f194a5fed99a0add55794f57ece123da79"
 
@@ -129,15 +127,43 @@ class Live(unittest.TestCase):
         st, _, b = req(PROFILE, {"PAYMENT-SIGNATURE": P.b64json(payload(body, signer=other, frm=other.address))})
         self.assertEqual((st, b["error"]), (402, "payment_mismatch"))
 
-    def test_forged_signature_refused_by_simulation_without_spending(self):
+    def test_forged_and_unfunded_signatures_refused_without_spending(self):
         provider = json.load(open(os.path.join(os.path.dirname(HERE), "ops", "state", "addresses.json")))["provider"]
         rpc = C.Rpc("https://mainnet.hsk.xyz")
-        n0 = int(rpc("eth_getTransactionCount", [provider, "latest"], tries=3), 16)
+        n0 = int(rpc("eth_getTransactionCount", [provider, "pending"], tries=3), 16)
         body = quote(PROFILE)
         st, _, b = req(PROFILE, {"PAYMENT-SIGNATURE": P.b64json(payload(body, signer=Account.create()))})
-        self.assertEqual((st, b["error"]), (402, "settlement_refused"))
-        self.assertEqual(b["message"], "FiatTokenV2: invalid signature")
-        self.assertEqual(int(rpc("eth_getTransactionCount", [provider, "latest"], tries=3), 16), n0, "no tx was sent")
+        self.assertEqual((st, b["error"]), (402, "bad_signature"), "refused locally, before any simulation")
+        poor = Account.create()
+        body = quote(PROFILE, payer=poor.address)
+        st, _, b = req(PROFILE, {"PAYMENT-SIGNATURE": P.b64json(payload(body, signer=poor, frm=poor.address))})
+        self.assertEqual((st, b["error"]), (402, "insufficient_funds"))
+        self.assertEqual(int(rpc("eth_getTransactionCount", [provider, "pending"], tries=3), 16), n0, "no tx was sent")
+
+    def test_unknown_tx_hash_is_free_404(self):
+        st, _, b = req("/v1/hsk/tx-receipt?hash=0x" + "00" * 28 + "deadbeef", {"X-Payer": BUYER.address})
+        self.assertEqual((st, b["error"]), (404, "not_found"))
+
+    def test_hsp_unprovable_capability_refused_before_settlement(self):
+        body = quote(PROFILE)
+        p = payload(body)
+        hx = body["extensions"]["hsp-draft"]
+        m = HSP.mandate_from_json({**hx["mandate"], "requiredCapabilities": "proves:delivery,proves:settlement-verified"})
+        p["extensions"] = {"hsp-draft": {"mandate": HSP.mandate_to_json(m), "signature": HSP.sign_mandate(BUYER, m, 177)}}
+        st, _, b = req(PROFILE, {"PAYMENT-SIGNATURE": P.b64json(p)})
+        self.assertEqual((st, b["error"]), (400, "hsp_mandate_invalid"))
+
+    def test_hostile_values_are_4xx(self):
+        body = quote(PROFILE)
+        p = payload(body)
+        p["accepted"] = json.loads(json.dumps(p["accepted"]))
+        p["accepted"]["amount"] = "\u00b2"
+        st, _, b = req(PROFILE, {"PAYMENT-SIGNATURE": P.b64json(p)})
+        self.assertEqual((st, b["error"]), (400, "bad_payment_payload"))
+        p = payload(body)
+        p["extensions"] = {"hsp-draft": "x"}
+        st, _, b = req(PROFILE, {"PAYMENT-SIGNATURE": P.b64json(p)})
+        self.assertEqual((st, b["error"]), (400, "hsp_mandate_invalid"))
 
     def test_bad_hsp_mandate_refused_before_settlement(self):
         body = quote(PROFILE)
@@ -152,7 +178,7 @@ class Live(unittest.TestCase):
         st, _, b = req(PROFILE, {"PAYMENT-SIGNATURE": P.b64json(p)})
         self.assertEqual((st, b["error"]), (400, "hsp_mandate_invalid"))
 
-    @unittest.skipUnless(SPEND, "spends 0.005 USDC.e: run with --spend")
+    @unittest.skipUnless(SPEND, "spends one tx-receipt payment (0.025 USDC.e): run with --spend")
     def test_replay_serves_at_most_3_and_settles_once(self):
         body = quote(TXR)
         h = {"PAYMENT-SIGNATURE": P.b64json(payload(body))}
