@@ -7,6 +7,10 @@ checked the adapter-signed receipt against the buyer's signed mandate.
 
 By Swift Bot Labs, for the HashKey Chain Horizon Hackathon (India), track **Agent Payments & A2A Settlement**.
 
+**Live dashboard:** [swiftbotlab.github.io/hsk-meter](https://swiftbotlab.github.io/hsk-meter/) reads the contract's
+events straight from the public explorer in your browser: totals, USDC.e per day, refund rate and the latest payments,
+each linked to its transaction.
+
 | | |
 |---|---|
 | Network | HashKey Chain mainnet, chain id `177` |
@@ -201,6 +205,8 @@ Implemented today (`server/hsp_draft.py`, labeled `hsp-draft/swiftbotlab-0`):
 | `agent/buyer.py` | the paying client with its spend guard |
 | `deploy/` | `run_sandboxed.sh` (bubblewrap sandbox for the seller) and `sandbox_probe.py` (what the sandbox can reach) |
 | `ops/state/` | the mainnet deployment record and the public addresses of the demo roles |
+| `docs/` | the live dashboard (static page on GitHub Pages; `snapshot.json` is its fallback when the explorer API is down) |
+| `tools/` | `dashboard_snapshot.py` (refreshes the fallback snapshot) and `test_dashboard.js` (decoder and counter tests) |
 
 ## Run the tests
 
@@ -210,6 +216,7 @@ cd contracts && forge test && cd ..   # 55 tests in 3 suites: unit + fuzz, gas, 
 python3 server/test_protocol.py       # protocol, typed data, HSP verifier, payload validation (offline)
 python3 server/test_security.py       # 39 security regression tests against an offline chain model
 python3 agent/test_buyer.py           # the buyer's spend guard
+node tools/test_dashboard.js          # dashboard decoder: only endpoints 1 and 2 of our provider count, hostile logs dropped
 HSK_METER_BUYER_KEY_FILE=buyer.env python3 server/test_protocol.py --online   # adds read-only checks against the live contract
 HSK_METER_BUYER_KEY_FILE=buyer.env python3 server/test_live.py                # hostile-input tests against a running seller (pays nothing)
 ```

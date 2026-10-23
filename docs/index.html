@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' https://hsk.blockscout.com; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="Live per-request payments between agents on HashKey Chain mainnet: USDC.e paid, refunds and withdrawals of the HSK Meter settlement contract.">
+<title>HSK Meter Live</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a78d6'/%3E%3Cpath d='M8 22V10h3v5h4v-5h3v12h-3v-4h-4v4z' fill='%23fff'/%3E%3Crect x='20' y='15' width='4' height='7' rx='1' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css?v=2">
+<script src="app.js?v=2" defer></script>
+</head>
+<body>
+<main class="wrap">
+  <header class="top">
+    <p class="brand">Swift Bot Labs</p>
+    <h1>HSK Meter</h1>
+    <p class="lede">Per-request payments between agents, settled in USDC.e on HashKey Chain mainnet. Every number below is read
+      in your browser from the public chain explorer.</p>
+    <div class="meta-row">
+      <span id="source-state" class="pill" role="status" aria-live="polite">Loading from hsk.blockscout.com…</span>
+      <button id="refresh" type="button" class="btn">Refresh</button>
+    </div>
+  </header>
+
+  <section aria-labelledby="kpi-h" id="kpis" class="tiles">
+    <h2 id="kpi-h" class="sr-only">Totals</h2>
+    <div class="tile">
+      <p class="tile-label">Paid requests</p>
+      <p class="tile-value" id="k-count">–</p>
+      <p class="tile-sub" id="k-count-sub">&nbsp;</p>
+    </div>
+    <div class="tile">
+      <p class="tile-label">USDC.e paid</p>
+      <p class="tile-value" id="k-paid">–</p>
+      <p class="tile-sub" id="k-paid-sub">&nbsp;</p>
+    </div>
+    <div class="tile">
+      <p class="tile-label">Refund rate</p>
+      <p class="tile-value" id="k-refund">–</p>
+      <p class="tile-sub" id="k-refund-sub">&nbsp;</p>
+    </div>
+    <div class="tile">
+      <p class="tile-label">Withdrawn by payee</p>
+      <p class="tile-value" id="k-withdrawn">–</p>
+      <p class="tile-sub" id="k-withdrawn-sub">&nbsp;</p>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="chart-h">
+    <div class="card-head">
+      <h2 id="chart-h">USDC.e per day</h2>
+      <p class="card-sub">UTC days, paid and refunded</p>
+    </div>
+    <ul class="legend" aria-label="Legend">
+      <li><span class="swatch s-paid" aria-hidden="true"></span>Paid</li>
+      <li><span class="swatch s-refund" aria-hidden="true"></span>Refunded</li>
+    </ul>
+    <div id="chart" class="chart" aria-describedby="chart-h"></div>
+    <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+    <details class="table-view">
+      <summary>Show as table</summary>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th scope="col">Day (UTC)</th><th scope="col" class="num">Paid</th><th scope="col" class="num">USDC.e paid</th><th scope="col" class="num">Refunded</th><th scope="col" class="num">USDC.e refunded</th></tr></thead>
+          <tbody id="day-table"></tbody>
+        </table>
+      </div>
+    </details>
+  </section>
+
+  <section class="card" aria-labelledby="latest-h">
+    <div class="card-head">
+      <h2 id="latest-h">Latest payments</h2>
+      <p class="card-sub">Newest first, each linked to its transaction</p>
+    </div>
+    <ol id="latest" class="latest"></ol>
+  </section>
+
+  <section class="card" aria-labelledby="scope-h">
+    <div class="card-head">
+      <h2 id="scope-h">What is counted</h2>
+    </div>
+    <p class="note">Anyone can register endpoints on the settlement contract, so contract-wide totals are not this service's
+      numbers. Only endpoints <b>1</b> and <b>2</b> are counted, and the page checks on-chain that both were registered by
+      provider <a id="provider-link" class="mono" href="https://hsk.blockscout.com/address/0x30CCc6d816854d1a66fBfecE15b1515a3E941160" target="_blank" rel="noopener">0x30CC…1160</a>.
+      Withdrawals are those of payee <a id="payee-link" class="mono" href="https://hsk.blockscout.com/address/0xA8A49A6Ca872D54a8FD5FB121139De9bff62a48D" target="_blank" rel="noopener">0xA8A4…a48D</a>.</p>
+    <ul id="endpoints" class="endpoints"></ul>
+    <p class="note" id="excluded"></p>
+    <dl class="facts">
+      <dt>Settlement contract</dt>
+      <dd><a class="mono long" href="https://hsk.blockscout.com/address/0x78C8476772BC209C3df09Da5e129d0879cd57F8c?tab=contract" target="_blank" rel="noopener">0x78C8476772BC209C3df09Da5e129d0879cd57F8c</a></dd>
+      <dt>Token</dt>
+      <dd><a href="https://hsk.blockscout.com/token/0x054ed45810DbBAb8B27668922D110669c9D88D0a" target="_blank" rel="noopener">USDC.e</a>, 6 decimals</dd>
+      <dt>Network</dt>
+      <dd>HashKey Chain mainnet, chain id 177</dd>
+    </dl>
+  </section>
+
+  <footer class="foot">
+    <p>HSK Meter by Swift Bot Labs · <a href="https://github.com/swiftbotlab/hsk-meter" target="_blank" rel="noopener">Source on GitHub</a> · MIT</p>
+  </footer>
+</main>
+</body>
+</html>
