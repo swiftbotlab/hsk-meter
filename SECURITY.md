@@ -144,6 +144,28 @@ off the network targets become reachable.
   call stops waiting, keeps its pending resend in the ledger and sends no response (as MCP asks); a call cancelled
   while still queued is never run. The client's next call for the same URL then resends or re-serves the payment.
 
+## HashKey ecosystem reads (`server/oracle.py`, `server/kyc.py`)
+
+- Read-only: the APRO price feeds and the KYC SBT are read with `eth_call` through the same allowlisted RPC; nothing
+  is signed or sent, and the egress guard and sandbox are unchanged.
+- Price feeds: a reading is used only if the proxy reports the pinned pair and 8 decimals, the round is finished
+  (`answeredInRound >= roundId`), the answer is positive and inside a sane range (USDC/USD 0.5-1.5, HSK/USD
+  0.0001-1000), the round time is not in the future and the round is at most 26 h old. Anything else counts as
+  unavailable. A failed read is retried after 30 s at the earliest (no RPC storm), an RPC blip keeps the current
+  reading, and a reading that fails validation is dropped at once.
+- What a wrong or manipulated feed can do: the gas guard prices HSK at `max(--hsk-usd, HSK/USD)`, so a feed can only
+  make it stricter. A feed reporting a huge HSK price makes the seller refuse settlements before sending anything
+  (tested); one reporting a tiny price changes nothing. The quote's `usd-estimate` is informational: the buyer signs
+  the USDC.e amount in `accepts[]`, and the buyer computes `amountUsd` from its own feed read, never from the seller's
+  claim. The settlement path reads only the cached reading, never the chain.
+- Dashboard: the USD value comes from the feed aggregator's own `AnswerUpdated` logs on the explorer (address-filtered,
+  so only that contract can add them), with the same checks, inserted with `textContent`; the CSP is unchanged.
+- KYC compliant mode is off unless the operator passes `--require-kyc`. When on, the decision is the SBT's own
+  `isHuman` verdict at the required level; an unreadable SBT fails closed (`502`, no quote, no settlement). Results are
+  cached for 60 s per address, so a revocation can take up to 60 s to apply; a payment made in that window is served,
+  and one whose SBT lapsed between quote and a self-paid payment is refunded on-chain before anything is served. The
+  SBT address is not source-verified on the explorer (see the README for how it was checked); `--kyc-sbt` overrides it.
+
 ## Known limitations
 
 All three are low severity and not fixed yet. The first and the third never cost the buyer an extra payment; the

@@ -18,6 +18,7 @@ each linked to its transaction.
 | Settlement token | USDC.e [`0x054ed45810DbBAb8B27668922D110669c9D88D0a`](https://hsk.blockscout.com/token/0x054ed45810DbBAb8B27668922D110669c9D88D0a) (Circle `FiatTokenV2_2`, EIP-3009) |
 | Payment protocol | x402 v2 (`402 Payment Required`, `PAYMENT-SIGNATURE`, `PAYMENT-RESPONSE`), network `eip155:177` |
 | Seller | provider [`0x30CCc6d816854d1a66fBfecE15b1515a3E941160`](https://hsk.blockscout.com/address/0x30CCc6d816854d1a66fBfecE15b1515a3E941160), endpoints `1` and `2` |
+| HashKey ecosystem | APRO price feeds (USD value of quotes and totals, gas guard) and an optional KYC SBT compliant mode, see [HashKey ecosystem](#hashkey-ecosystem) |
 
 ## Live proof on mainnet
 
@@ -118,7 +119,8 @@ Specific to this rail (declared in `accepts[0].extra`): the signed type is `Rece
 (`primaryType`, `settlement: "contract"`), `payTo` is the settlement contract, and the nonce comes from the quote
 (`extra.nonce`) because it binds the payment to one request. A client that signs a random-nonce
 `TransferWithAuthorization` is refused before anything is sent. `accepts[1]` (`hsk-paywall-tx`) is the self-paid
-alternative.
+alternative. Optional `extensions` of the `402`: `hsp-draft` (the mandate offer), `usd-estimate` (the price in USD from
+the APRO feed) and `kyc-sbt` (only in compliant mode).
 
 ## Quickstart
 
@@ -171,7 +173,9 @@ and the on-chain price, and unless the amount fits under `--max-price` and the s
    failure; `systemctl --user stop` stops the whole sandbox).
 
    Free routes: `GET /`, `GET /health`, `GET /.well-known/x402`. The payee withdraws earned credit with
-   `withdraw(to, amount)` from its own wallet.
+   `withdraw(to, amount)` from its own wallet. Options for the [HashKey ecosystem](#hashkey-ecosystem) reads:
+   `--require-kyc basic|advanced|premium|ultimate` (compliant mode, off by default), `--kyc-sbt 0x...`,
+   `--no-price-feeds`, `--hsk-usd` (the gas guard's HSK price floor).
 
 ## Use it from any MCP client
 
@@ -180,7 +184,7 @@ can pay HSK Meter sellers per request. It offers three tools:
 
 | Tool | What it does |
 |---|---|
-| `hsk_meter_quote` | fetches the seller's x402 terms for a URL and runs the spend guard on them; signs and pays nothing |
+| `hsk_meter_quote` | fetches the seller's x402 terms for a URL and runs the spend guard on them, and returns the price in USD (`amountUsd`) from its own read of the APRO USDC/USD feed; signs and pays nothing |
 | `hsk_meter_pay` | pays one request (optionally with the HSP-style mandate) and returns the data plus the settlement transaction, or the refund; `new_purchase: true` pays again for a URL it delivered in the last 10 minutes |
 | `hsk_meter_status` | session spend (spent, reserved, cap, remaining), payments waiting to be resent or re-served, and the buyer's USDC.e balance |
 
@@ -212,6 +216,75 @@ under that payment unless it passes `new_purchase: true`. A call returns within 
 
 Row 23 of the live-proof table was paid this way: quote, then `hsk_meter_pay` with HSP, over stdio from an MCP client.
 
+## HashKey ecosystem
+
+HSK Meter reads two products that HashKey Chain recommends to builders. Both are reads only: nothing is signed or
+sent, and a product that is unavailable never blocks a payment.
+
+### APRO price feeds
+
+| Feed (HashKey Chain mainnet) | Address | Used for |
+|---|---|---|
+| USDC/USD | [`0x244Ce344df8837c9d938867E2Ffbf0E4B0169B56`](https://hsk.blockscout.com/address/0x244Ce344df8837c9d938867E2Ffbf0E4B0169B56?tab=contract) | the USD value of every quote, the buyer's own USD view, the dashboard's USD total |
+| HSK/USD | [`0x86CE42c1b714149Dc3A7b17169EF67b5F78A224b`](https://hsk.blockscout.com/address/0x86CE42c1b714149Dc3A7b17169EF67b5F78A224b?tab=contract) | the seller's per-sale gas guard |
+
+- **Quotes.** Every `402` carries `extensions["usd-estimate"]`: the price in USD at the current USDC/USD round, with
+  the feed address, round id and round time. It is informational; the amount to sign is still `accepts[].amount` in
+  USDC.e.
+
+  ```json
+  "usd-estimate": {
+    "priceUsd": "0.029994",
+    "source": "APRO price feed, HashKey Chain mainnet",
+    "feed": {"pair": "USDC/USD", "feed": "0x244Ce344df8837c9d938867E2Ffbf0E4B0169B56", "price": "0.99982693",
+             "roundId": "18446744073709552295", "updatedAtIso": "2026-10-23T07:39:41Z", "...": "..."}
+  }
+  ```
+
+- **Buyer and MCP.** `hsk_meter_quote` returns `amountUsd` computed from the buyer's own read of the feed, so an agent
+  that budgets in USD never depends on the seller's number.
+- **Gas guard.** The seller pays the gas of every `exact` settlement and refuses one whose expected fee is above the
+  sale's value. It prices HSK at the higher of `--hsk-usd` (default 0.10) and the APRO HSK/USD answer, so the feed can
+  only make the guard stricter. At today's HSK price (about $0.087) the floor applies; if HSK rises above $0.10, the
+  guard follows the feed without operator action. Settlements use the cached reading (refreshed by quotes and every
+  60 seconds) and never wait on a feed.
+- **Dashboard.** "Net value in USD" converts the totals at the newest USDC/USD round, read from the feed aggregator's
+  `AnswerUpdated` events on the explorer. The snapshot stores a checked `latestRoundData()` reading as the fallback.
+- **Checks.** A reading is used only when the proxy reports the expected pair and 8 decimals, the round is finished,
+  the answer is positive and in a sane range, the round time is not in the future and the round is at most 26 hours
+  old. On mainnet these feeds post a round at least every 24 hours, plus updates when the price moves.
+
+Both addresses are listed on the [HashKey Chain oracle page](https://docs.hskchain.net/docs/Build-on-HashKey-Chain/Tools/Oracle)
+and were checked on-chain before use: verified `EACAggregatorProxy` source on Blockscout, `description()` and
+`decimals()` match, and both were deployed by the same account as the other APRO feeds on that page. (The copy of the
+oracle page in the docs' GitHub repository drops two characters of the HSK/USD address; the live page and the chain
+agree on the address above.)
+
+### KYC SBT compliant mode (optional, off by default)
+
+`--require-kyc basic|advanced|premium|ultimate` makes the seller serve only payers that hold a valid HashKey Chain
+[KYC SBT](https://docs.hskchain.net/docs/Build-on-HashKey-Chain/Tools/KYC) at that level:
+
+- A quote is refused with `403 kyc_required` (free, nothing signed) unless `isHuman(payer)` returns valid at the
+  required level. The refusal says why, from `getKycInfo`: no SBT, revoked, no longer valid, or level too low.
+- The check runs again right before settlement, and before the first serve of a self-paid payment; a self-paid
+  payment whose SBT lapsed in between is refunded on-chain.
+- An unreadable SBT fails closed (`502`, nothing issued). The `402` states the requirement in
+  `extensions["kyc-sbt"]`.
+
+HSP's compliant payment scenario asks for a KYC attestation; this SBT check is an on-chain source for one, to be
+wired into the HSP receipts once the HSP SDK is published.
+
+> [!NOTE]
+> The KYC page documents the interface but does not print a mainnet address. HSK Meter uses
+> [`0x0f362c05fb3Fadca687648F412abE2A6d6450D70`](https://hsk.blockscout.com/address/0x0f362c05fb3Fadca687648F412abE2A6d6450D70),
+> the mainnet address in the KYC provider's own demo configuration
+> ([hunyuan-kyc/next-kyc-demo](https://github.com/hunyuan-kyc/next-kyc-demo/blob/main/.env.example)). Checked on-chain:
+> `name()` is "KYC SBT", `symbol()` "KYC", `suffix()` ".hsk"; the documented `isHuman`, `getKycInfo`, `requestKyc` and
+> `getTotalFee` selectors are in its code; both reads decode with the documented types; and `resolver()` returns the
+> resolver address from the same file. Its source is not verified on the explorer, so `--kyc-sbt` can point the seller
+> at another address. The demo seller runs with compliant mode off.
+
 ## Security model
 
 Full details and the threat model are in [SECURITY.md](SECURITY.md). In short:
@@ -230,6 +303,8 @@ Full details and the threat model are in [SECURITY.md](SECURITY.md). In short:
 - **Buyer and MCP server:** spend cap reserved before anything is signed, provider and payee pinned, every claim
   re-checked on-chain (refunds are read at the refund's block, so a lagging RPC node cannot hide one); the MCP client
   cannot raise any operator limit or reach origins outside the allowlist.
+- **Ecosystem reads:** price feeds and the KYC SBT are read-only; a wrong feed can only tighten the gas guard, and an
+  unreadable SBT fails closed.
 
 ## HSP: what follows the published spec, and what is still draft
 
@@ -261,14 +336,14 @@ Implemented today (`server/hsp_draft.py`, labeled `hsp-draft/swiftbotlab-0`):
 | `contracts/` | Foundry project: `src/HskPayPerRequest.sol`, unit and fuzz tests, model-based invariant suite, gas test |
 | `contracts/test/fixtures/` | runtime code of USDC.e's implementation and its signature library, read from HashKey Chain (hash-pinned) |
 | `contracts/DEPENDENCIES.md` | provenance of the vendored OpenZeppelin 5.1.0 and forge-std v1.16.2 (`verify_deps.sh` re-checks them) |
-| `server/` | `seller.py` (x402 v2 seller, settlement, refunds), `protocol.py`, `chain.py`, `hsp_draft.py`, `state.py` (journal), `egress.py` (egress guard) |
-| `server/test_*.py`, `server/testkit.py` | protocol tests, security regression tests on an offline chain model, live hostile-input tests |
+| `server/` | `seller.py` (x402 v2 seller, settlement, refunds), `protocol.py`, `chain.py`, `hsp_draft.py`, `state.py` (journal), `egress.py` (egress guard), `oracle.py` (APRO price feeds), `kyc.py` (KYC SBT compliant mode) |
+| `server/test_*.py`, `server/testkit.py` | protocol tests, security regression tests on an offline chain model, ecosystem tests (feeds, KYC mode), live hostile-input tests |
 | `agent/buyer.py` | the paying client with its spend guard (CLI and library: `quote`, `buy`, `status`) |
 | `agent/mcp_server.py` | the buyer as an MCP server (stdio) with operator-set spend limits |
 | `deploy/` | `run_sandboxed.sh` (bubblewrap sandbox for the seller), `hsk-meter-seller.service` (systemd user unit template) and `sandbox_probe.py` (what the sandbox can reach) |
 | `ops/state/` | the mainnet deployment record and the public addresses of the demo roles |
 | `docs/` | the live dashboard (static page on GitHub Pages; `snapshot.json` is its fallback when the explorer API is down) |
-| `tools/` | `dashboard_snapshot.py` (refreshes the fallback snapshot) and `test_dashboard.js` (decoder and counter tests) |
+| `tools/` | `dashboard_snapshot.py` (refreshes the fallback snapshot, incl. a checked USDC/USD reading) and `test_dashboard.js` (decoder, counter and USD tests) |
 
 ## Run the tests
 
@@ -279,7 +354,9 @@ python3 server/test_protocol.py       # protocol, typed data, HSP verifier, payl
 python3 server/test_security.py       # 42 security regression tests against an offline chain model
 python3 agent/test_buyer.py           # the buyer's spend guard
 python3 agent/test_mcp.py             # MCP server end to end against the real seller on an offline chain model (56 tests)
-node tools/test_dashboard.js          # dashboard decoder: only endpoints 1 and 2 of our provider count, hostile logs dropped
+python3 server/test_ecosystem.py      # APRO feeds (quote USD, gas guard, buyer USD view) and KYC SBT mode (29 offline tests)
+node tools/test_dashboard.js          # dashboard decoder and USD value: only endpoints 1 and 2 of our provider count, hostile logs dropped (35 tests)
+python3 server/test_ecosystem.py --online                                     # adds read-only checks of the real feeds and SBT
 HSK_METER_BUYER_KEY_FILE=buyer.env python3 server/test_protocol.py --online   # adds read-only checks against the live contract
 HSK_METER_BUYER_KEY_FILE=buyer.env python3 server/test_live.py                # hostile-input tests against a running seller (pays nothing)
 ```
