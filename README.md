@@ -11,7 +11,7 @@ By Swift Bot Labs, for the HashKey Chain Horizon Hackathon (India), track **Agen
 events straight from the public explorer in your browser: totals, USDC.e per day, refund rate and the latest payments,
 each linked to its transaction.
 
-| | |
+| Component | Details |
 |---|---|
 | Network | HashKey Chain mainnet, chain id `177` |
 | Settlement contract | [`HskPayPerRequest` `0x78C8476772BC209C3df09Da5e129d0879cd57F8c`](https://hsk.blockscout.com/address/0x78C8476772BC209C3df09Da5e129d0879cd57F8c?tab=contract), source verified on Blockscout and [Sourcify](https://repo.sourcify.dev/177/0x78C8476772BC209C3df09Da5e129d0879cd57F8c) (exact match) |
