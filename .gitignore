@@ -4,10 +4,12 @@ contracts/cache/
 __pycache__/
 *.pyc
 ops/state/buyer_session.json
+ops/state/mcp_session.json
 *.bak-*
 # internal operator notes and scripts (funding, local key handling) stay out of the repository
 STATUS.md
 REVIEW.md
+REVIEW_2B.md
 ops/*.py
 ops/state/*.jsonl
 run/
