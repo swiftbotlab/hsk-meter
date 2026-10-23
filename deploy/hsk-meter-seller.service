@@ -1,0 +1,24 @@
+# systemd user unit for the HSK Meter seller in its bubblewrap sandbox (template: replace the /path/to/... values).
+#   cp deploy/hsk-meter-seller.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+#   systemctl --user enable --now hsk-meter-seller      (logs: journalctl --user -u hsk-meter-seller)
+#   loginctl enable-linger "$USER"                       (keeps it running without an open login session)
+# run_sandboxed.sh stays in the foreground as bwrap's parent: `systemctl --user stop` stops the whole sandbox.
+# For production, use this unit instead of starting the seller with nohup or & from a shell.
+[Unit]
+Description=HSK Meter seller (x402 on HashKey Chain) in a bubblewrap sandbox
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=HSK_METER_KEY_DIR=/path/to/keys
+Environment=HSK_METER_VENV=/path/to/venv
+Environment=HSK_METER_STATE_DIR=/path/to/hsk-meter/run
+ExecStart=/path/to/hsk-meter/deploy/run_sandboxed.sh seller --port 8402
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

@@ -673,5 +673,123 @@ class StateJournal(unittest.TestCase):
             shutil.rmtree(d)
 
 
+class B2B4LauncherLifetime(unittest.TestCase):
+    """B2B-4: deploy/run_sandboxed.sh started in the background (`&`, nohup, disown) keeps the sandbox running after the
+    launching shell exits; SIGTERM or SIGKILL to the launcher still takes the whole sandbox down, and
+    HSK_METER_DIE_WITH_PARENT=1 still ties it to whatever started the script. The real script and real bwrap run a
+    stand-in "python" (a shell loop) with dummy key files: no keys, no network."""
+
+    SCRIPT = os.path.join(os.path.dirname(HERE), "deploy", "run_sandboxed.sh")
+
+    def setUp(self):
+        if not os.access("/usr/bin/bwrap", os.X_OK):
+            self.skipTest("bubblewrap is not installed")
+        base = os.path.join(os.path.dirname(HERE), "tmp")
+        self.d = tempfile.mkdtemp(dir=base if os.path.isdir(base) else None)
+        keys = os.path.join(self.d, "keys")
+        os.mkdir(keys, 0o700)
+        for f in ("provider.env", "adapter.env", "token.env"):
+            with open(os.path.join(keys, f), "w") as fh:
+                fh.write("DUMMY=1\n")                           # never a real key: the stand-in reads nothing
+        os.makedirs(os.path.join(self.d, "venv", "bin"))
+        self.marker = os.path.join(self.d, "venv", "bin", "python")
+        with open(self.marker, "w") as fh:
+            fh.write("#!/bin/sh\nwhile :; do sleep 1; done\n")
+        os.chmod(self.marker, 0o755)
+        self.env = {"PATH": "/usr/bin:/bin", "HOME": self.d, "HSK_METER_KEY_DIR": keys,
+                    "HSK_METER_VENV": os.path.join(self.d, "venv"), "HSK_METER_STATE_DIR": os.path.join(self.d, "state")}
+        self.launchers = []
+
+    def tearDown(self):
+        import signal
+        for pid in self.launchers + self.procs(any_arg=True):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        self.wait_for(lambda: not self.procs(any_arg=True), 10)
+        shutil.rmtree(self.d)
+
+    def procs(self, any_arg=False):
+        """Host PIDs of the stand-in seller (`/bin/sh <venv>/bin/python ...`); any_arg: also the bwrap processes."""
+        found = []
+        for p in os.listdir("/proc"):
+            if not p.isdigit():
+                continue
+            try:
+                with open(f"/proc/{p}/cmdline", "rb") as fh:
+                    argv = fh.read().split(b"\0")
+                with open(f"/proc/{p}/stat") as fh:
+                    if fh.read().rsplit(")", 1)[1].split()[0] == "Z":
+                        continue
+            except OSError:
+                continue
+            m = self.marker.encode()
+            if (argv[1:2] == [m]) or (any_arg and m in argv):
+                found.append(int(p))
+        return found
+
+    @staticmethod
+    def alive(pid):
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+        except OSError:
+            return False
+
+    @staticmethod
+    def wait_for(cond, seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            if cond():
+                return True
+            time.sleep(0.2)
+        return cond()
+
+    def launch(self, how, extra_env=None):
+        """Start the launcher from a shell that exits ~2 s later (after bwrap is up); returns the launcher PID."""
+        cmd = {"amp": '"$S" probe >"$L" 2>&1 & echo $!',
+               "nohup": 'nohup "$S" probe >"$L" 2>&1 & echo $!',
+               "disown": '"$S" probe >"$L" 2>&1 & echo $!; disown'}[how] + "; sleep 2"
+        env = {**self.env, **(extra_env or {}), "S": self.SCRIPT, "L": os.path.join(self.d, how + ".log")}
+        r = subprocess.run(["/bin/bash", "-c", cmd], env=env, capture_output=True, text=True, timeout=60)
+        pid = int(r.stdout.split()[0])
+        self.launchers.append(pid)
+        return pid
+
+    def test_background_start_survives_the_shell_exit(self):
+        for how in ("amp", "nohup", "disown"):
+            launcher = self.launch(how)
+            time.sleep(2)                               # the launching shell is gone by now
+            with open(os.path.join(self.d, how + ".log")) as fh:
+                log = fh.read()
+            self.assertEqual(len(self.procs()), 1, f"{how}: the sandboxed process must survive ({log[-300:]})")
+            self.assertTrue(self.alive(launcher), how)
+            os.kill(launcher, 15)
+            self.assertTrue(self.wait_for(lambda: not self.procs(any_arg=True), 10), f"{how}: SIGTERM stops it")
+
+    def test_killing_the_launcher_kills_the_sandbox(self):
+        launcher = self.launch("nohup")
+        self.assertTrue(self.wait_for(lambda: len(self.procs()) == 1, 5), "started")
+        os.kill(launcher, 9)                            # the supervisor dies hard: bwrap's PDEATHSIG fires
+        self.assertTrue(self.wait_for(lambda: not self.procs(any_arg=True), 10), "the sandbox died with its launcher")
+
+    def test_die_with_parent_on_request(self):
+        for flag, survives in (("1", False), ("0", True)):
+            parent = subprocess.Popen(["/bin/bash", "-c", '"$S" probe >/dev/null 2>&1 & wait'],
+                                      env={**self.env, "S": self.SCRIPT, "HSK_METER_DIE_WITH_PARENT": flag})
+            try:
+                self.assertTrue(self.wait_for(lambda: len(self.procs()) == 1, 10), "started")
+                parent.kill()                           # whatever started the script dies
+                parent.wait(10)
+                time.sleep(2)
+                self.assertEqual(bool(self.procs()), survives,
+                                 f"HSK_METER_DIE_WITH_PARENT={flag}: {'survives' if survives else 'dies with the parent'}")
+            finally:
+                for pid in self.procs(any_arg=True):
+                    os.kill(pid, 9)
+                self.wait_for(lambda: not self.procs(any_arg=True), 10)
+
+
 if __name__ == "__main__":
     unittest.main()

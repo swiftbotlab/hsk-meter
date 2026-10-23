@@ -10,8 +10,12 @@
 # $HOME (other secrets, browser profiles, other projects), /var, D-Bus and other sockets.
 # The network namespace is shared (the seller must reach the RPC and accept local connections); outgoing connections
 # are limited in-process by server/egress.py to the RPC host on port 443.
-# --die-with-parent: stopping the launcher (or its service) stops the seller too; without it, SIGTERM to the outer
-# bwrap left the inner sandbox running.
+# Lifetime: this script stays in the foreground as bwrap's parent (a small supervisor) and bwrap gets
+# --die-with-parent, so SIGTERM/SIGINT/SIGHUP to this script stop the sandbox and SIGKILL to it kills the sandbox too
+# (without --die-with-parent, SIGTERM to the outer bwrap left the inner sandbox running). A seller started in the
+# background (`&`, nohup, disown) keeps running after the launching shell exits. HSK_METER_DIE_WITH_PARENT=1 instead
+# exec's bwrap, so the sandbox dies with whatever started this script (for a parent process that wants exactly that).
+# For a long-running seller use a systemd user unit (template: deploy/hsk-meter-seller.service).
 # Why bwrap and not systemd's ProtectHome=/IPAddressDeny=: per-user systemd managers on hosts that restrict
 # unprivileged user namespaces silently skip those directives; bwrap enforces the allowlist itself.
 set -euo pipefail
@@ -46,4 +50,14 @@ case "$WHAT" in
           ARGS+=(--setenv HSK_METER_PROBE_FILES "${HSK_METER_PROBE_FILES:-}" --setenv HSK_METER_PROBE_DIRS "${HSK_METER_PROBE_DIRS:-}") ;;
   *) echo "usage: run_sandboxed.sh seller|probe [args]" >&2; exit 2 ;;
 esac
-exec /usr/bin/bwrap "${ARGS[@]}" "$VENV/bin/python" -I "$SCRIPT" "$@"
+if [ "${HSK_METER_DIE_WITH_PARENT:-0}" = 1 ]; then
+  exec /usr/bin/bwrap "${ARGS[@]}" "$VENV/bin/python" -I "$SCRIPT" "$@"
+fi
+/usr/bin/bwrap "${ARGS[@]}" "$VENV/bin/python" -I "$SCRIPT" "$@" &
+CHILD=$!
+trap 'kill -TERM "$CHILD" 2>/dev/null' TERM INT HUP
+while :; do
+  rc=0
+  wait "$CHILD" || rc=$?
+  kill -0 "$CHILD" 2>/dev/null || exit "$rc"     # still running: a signal interrupted wait; wait again
+done
