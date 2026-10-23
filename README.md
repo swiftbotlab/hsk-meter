@@ -167,6 +167,9 @@ and the on-chain price, and unless the amount fits under `--max-price` and the s
    python3 server/seller.py --key-dir /path/to/keys --port 8402      # without the sandbox
    ```
 
+   For a long-running seller, install the systemd user unit template `deploy/hsk-meter-seller.service` (restarts on
+   failure; `systemctl --user stop` stops the whole sandbox).
+
    Free routes: `GET /`, `GET /health`, `GET /.well-known/x402`. The payee withdraws earned credit with
    `withdraw(to, amount)` from its own wallet.
 
@@ -178,12 +181,17 @@ can pay HSK Meter sellers per request. It offers three tools:
 | Tool | What it does |
 |---|---|
 | `hsk_meter_quote` | fetches the seller's x402 terms for a URL and runs the spend guard on them; signs and pays nothing |
-| `hsk_meter_pay` | pays one request (optionally with the HSP-style mandate) and returns the data plus the settlement transaction, or the refund |
-| `hsk_meter_status` | session spend (spent, reserved, cap, remaining) and the buyer's USDC.e balance |
+| `hsk_meter_pay` | pays one request (optionally with the HSP-style mandate) and returns the data plus the settlement transaction, or the refund; `new_purchase: true` pays again for a URL it delivered in the last 10 minutes |
+| `hsk_meter_status` | session spend (spent, reserved, cap, remaining), payments waiting to be resent or re-served, and the buyer's USDC.e balance |
 
 The operator sets the limits when starting the server; the client cannot change them. These are the key, the seller
 origins it may pay, the pinned provider, payee and HSP adapter, the per-request price limit (a client may pass a lower
 `max_price`, never a higher one), the session cap and payments per minute. Seller data is returned as untrusted content.
+Retries never pay twice. If a paid answer is lost or unreadable, the next `hsk_meter_pay` for the same URL resends the
+same signed payment (kept in the session ledger, so this also works after a restart). For 10 minutes after a delivery,
+a call for the same URL, for example after the client timed out or cancelled the first one, is re-served for free
+under that payment unless it passes `new_purchase: true`. A call returns within about 45 seconds, and the server honours
+`notifications/cancelled`.
 
 ```json
 {
@@ -257,7 +265,7 @@ Implemented today (`server/hsp_draft.py`, labeled `hsp-draft/swiftbotlab-0`):
 | `server/test_*.py`, `server/testkit.py` | protocol tests, security regression tests on an offline chain model, live hostile-input tests |
 | `agent/buyer.py` | the paying client with its spend guard (CLI and library: `quote`, `buy`, `status`) |
 | `agent/mcp_server.py` | the buyer as an MCP server (stdio) with operator-set spend limits |
-| `deploy/` | `run_sandboxed.sh` (bubblewrap sandbox for the seller) and `sandbox_probe.py` (what the sandbox can reach) |
+| `deploy/` | `run_sandboxed.sh` (bubblewrap sandbox for the seller), `hsk-meter-seller.service` (systemd user unit template) and `sandbox_probe.py` (what the sandbox can reach) |
 | `ops/state/` | the mainnet deployment record and the public addresses of the demo roles |
 | `docs/` | the live dashboard (static page on GitHub Pages; `snapshot.json` is its fallback when the explorer API is down) |
 | `tools/` | `dashboard_snapshot.py` (refreshes the fallback snapshot) and `test_dashboard.js` (decoder and counter tests) |
@@ -268,9 +276,9 @@ Implemented today (`server/hsp_draft.py`, labeled `hsp-draft/swiftbotlab-0`):
 pip install -r requirements.txt
 cd contracts && forge test && cd ..   # 55 tests in 3 suites: unit + fuzz, gas, model-based invariants (256 runs x 200 calls)
 python3 server/test_protocol.py       # protocol, typed data, HSP verifier, payload validation (offline)
-python3 server/test_security.py       # 39 security regression tests against an offline chain model
+python3 server/test_security.py       # 42 security regression tests against an offline chain model
 python3 agent/test_buyer.py           # the buyer's spend guard
-python3 agent/test_mcp.py             # MCP server end to end against the real seller on an offline chain model (17 tests)
+python3 agent/test_mcp.py             # MCP server end to end against the real seller on an offline chain model (56 tests)
 node tools/test_dashboard.js          # dashboard decoder: only endpoints 1 and 2 of our provider count, hostile logs dropped
 HSK_METER_BUYER_KEY_FILE=buyer.env python3 server/test_protocol.py --online   # adds read-only checks against the live contract
 HSK_METER_BUYER_KEY_FILE=buyer.env python3 server/test_live.py                # hostile-input tests against a running seller (pays nothing)

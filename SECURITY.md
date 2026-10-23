@@ -74,7 +74,11 @@
 `deploy/run_sandboxed.sh` runs the seller under bubblewrap. Visible inside: `/usr`, `/etc`, the repository's `server/`
 and `deploy/` and the deployment record (read-only), the Python environment (read-only), the key directory (read-only)
 and the state directory (read-write); private `/tmp`, `/run` and `/home`, own PID/IPC/UTS namespaces, a clean
-environment, all capabilities dropped. The sandbox dies with its launcher (`--die-with-parent`). `deploy/sandbox_probe.py` shows what the process can reach: inside the sandbox
+environment, all capabilities dropped. The launcher stays in the foreground as bubblewrap's parent: SIGTERM to it stops
+the whole sandbox, SIGKILL to it kills the sandbox too (`--die-with-parent`), and a seller started in the background
+keeps running after the shell that started it exits. Run a long-lived seller as a systemd user unit (template:
+`deploy/hsk-meter-seller.service`); `HSK_METER_DIE_WITH_PARENT=1` makes the sandbox die with whatever started the
+launcher instead. `deploy/sandbox_probe.py` shows what the process can reach: inside the sandbox
 it cannot see other key files or the rest of the home directory, cannot write its own code or its keys, and (with the
 egress guard) cannot connect to loopback services such as a browser debugging port, the LAN or any host other than the
 RPC. Positive controls: the same probe outside the sandbox reaches all of them, and inside the sandbox with the guard
@@ -99,6 +103,27 @@ off the network targets become reachable.
 - The spend cap counts a payment before the authorization is signed (or the pay transaction sent). The reservation
   becomes spent when the payment is verified, and is released only when the chain shows nothing can be charged any more
   (`getPayment` unpaid and, after `validBefore`, `authorizationState == false`).
+- After signing, any answer without the data that is not a definitive seller refusal (no answer, a redirect, a `5xx`, a
+  `200` without data or with a body that is not JSON) leaves the outcome unknown. The signed payment is written to the
+  session ledger (mode 0600, under its lock) before the request is sent and kept for 50 minutes, inside the seller's
+  1 h re-serve window. The next purchase of the same URL resends that same signed payment instead of signing a new
+  one, also after a restart or from another process on the same ledger; a request id is charged at most once on-chain,
+  so the retry never pays twice. A settlement transaction named in `PAYMENT-RESPONSE` is used only after its `Paid`
+  event is verified on-chain.
+- A `502` that says the payment was already served and is not refunded (the seller delivered it before, for example
+  into an answer that was lost, and its data source failed on this re-serve) keeps the signed payment too: retrying
+  after the seller's `Retry-After` resends the same payment. The entry is dropped only on a verified, pending or queued
+  refund, or on a definitive refusal such as `429 already_served` or `410 payment_expired`.
+- Re-serve window: after a delivered answer the signed request stays in the ledger for 10 minutes (inside the seller's
+  1 h / 3-serve window). A call for the same URL in that window, for example a retry after a client timeout, resends
+  it and the seller re-serves the paid request for free. Only an explicit new purchase (`new_purchase` in the MCP tool,
+  `--new-purchase` on the command line) pays again; it never skips a payment whose outcome is still unknown. The
+  headers kept are authorizations that are already used and cannot be charged again.
+- Time budget: one purchase is bounded at 45 s by default (`--time-budget`), below common MCP client timeouts. The paid
+  request's timeout, the seller's "still settling" retries and the receipt polls stop at the budget; nothing is signed
+  with less than 15 s left. A payment that is not finished by then is reported as unconfirmed and resent on the next
+  call, never bought again. A receipt poll cut short is reported as unknown, never as missing. Single RPC reads keep
+  their own 10 s timeouts.
 
 ## MCP server (`agent/mcp_server.py`)
 
@@ -109,6 +134,39 @@ off the network targets become reachable.
   before any request is made.
 - Every payment goes through the buyer's guard above. Seller data is returned as untrusted content and is never
   interpreted. Messages over 1 MB, batches and malformed JSON are rejected; logs go to stderr without keys or signatures.
+- Retry semantics of `hsk_meter_pay`: calling it again with the same URL never pays twice. While a payment's outcome is
+  unconfirmed (`resendOnRetry`, with `retryAfterS` when the seller gave one) the call resends the same signed payment.
+  For 10 minutes after a delivery the call is re-served for free under the same payment (`resent`, `redelivery`, a
+  `note`), unless the client passes `new_purchase: true`, which pays for a new response. `new_purchase` is ignored, and
+  the payment is resent, while an earlier payment for that URL has no final outcome. `hsk_meter_status` lists both
+  kinds (`pendingResends`, `reServable`) without headers.
+- Cancellation: stdin is read on a separate thread, so `notifications/cancelled` reaches the call it names. A running
+  call stops waiting, keeps its pending resend in the ledger and sends no response (as MCP asks); a call cancelled
+  while still queued is never run. The client's next call for the same URL then resends or re-serves the payment.
+
+## Known limitations
+
+All three are low severity and not fixed yet. The first and the third never cost the buyer an extra payment; the
+second can lead to one extra purchase, only in the rare case described.
+
+- Serve limit vs. re-serve window: the seller serves a paid response at most 3 times. Inside the buyer's 10-minute
+  re-serve window, the 4th call for the same URL gets the seller's `429 already_served` and returns an error
+  (`paid_not_delivered`, with correct advice); the 5th call pays again. The advice returned with the 3rd serve still
+  says another call within 10 minutes is a free re-serve. An agent that polls one URL sees an error on every 4th call.
+  Planned fix: count serves on the buyer side and stop re-serving at the seller's limit, or word the advice as
+  "up to 3 serves".
+- Two processes on one session ledger (theoretical, not reproduced): when process A re-serves a delivered entry for a
+  `(payer, url)` while process B buys the same URL with `new_purchase` and writes its new signed payment ahead to the
+  same ledger key, A's final write can overwrite B's entry. If B finishes, its own final write restores it. If B is
+  killed before that write, its unknown-outcome entry is lost, and once A's window has passed the next call for that
+  URL buys again even if B's payment settled. All three conditions are needed at once: a shared ledger, `new_purchase`
+  and a crash. Planned fix: write the delivered entry only when the key is empty or still holds the same request id
+  (compare-and-set under the ledger lock, as the drop already does).
+- Cancellation matching: the MCP stdin reader recognises `tools/call` and `notifications/cancelled` by a raw byte
+  match before it parses the line. A client that escapes the slash in the method name (valid JSON, for example
+  `"notifications\/cancelled"`) is still handled correctly, but its call is not registered for cancellation, so a
+  cancel is ignored and the call runs to completion. This only affects cancellation: the 10-minute re-serve window
+  still covers the client's retry. Planned fix: match on the parsed method.
 
 ## Dependencies
 
