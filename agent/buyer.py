@@ -7,7 +7,8 @@ authorization (or pays the contract itself), and verifies everything it is told 
            [--journal-file F] [--new-purchase] [--time-budget 45]
   (--key-file: a file with HKPW_BUYER_PK=0x...; defaults: $HSK_METER_BUYER_KEY_FILE, $HSK_METER_PROVIDER,
    $HSK_METER_PAYEE; --journal-file: $HSK_METER_BUYER_JOURNAL or ops/state/buyer_runs.jsonl)
-  As a library: quote() (price + guard, signs nothing), buy() (one paid request), status() (ledger + balance);
+  As a library: quote() (price + guard + USD value from the APRO USDC/USD feed, signs nothing), buy() (one paid
+  request), status() (ledger + balance);
   agent/mcp_server.py exposes them as MCP tools.
 
 Spend guard (checked BEFORE signing anything): network eip155:177 only; asset USDC.e only; payTo must be the
@@ -62,6 +63,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "server"))
 import chain as C        # noqa: E402
 import hsp_draft as HSP  # noqa: E402
+import oracle as O       # noqa: E402
 import protocol as P     # noqa: E402
 from eth_abi import encode  # noqa: E402
 from eth_account import Account  # noqa: E402
@@ -588,7 +590,20 @@ def quote(url, *, me, rpc, contract, expect_provider, expect_payee, max_units, c
                 "settlementContract": acc.get("payTo"), "provider": e.get("provider"), "payee": e.get("payee"),
                 "hspOffered": bool(ext.get("hsp-draft")),
                 "sessionUsedUnits": session.total(), "sessionCapUnits": cap_units, "maxPriceUnits": max_units})
+    out.update(usd_view(rpc, amount))
     return out
+
+
+def usd_view(rpc, amount):
+    """The quote's USD value from our OWN read of the APRO USDC/USD feed on HashKey Chain (the seller's
+    extensions["usd-estimate"] is not trusted). Informational only: the spend guard works in USDC.e units."""
+    if amount is None:
+        return {"amountUsd": None}
+    try:
+        r = O.read_checked(rpc, "USDC/USD")
+    except O.FeedError as e:
+        return {"amountUsd": None, "usdFeed": {"available": False, "reason": str(e)[:120]}}
+    return {"amountUsd": f"{O.usd_of_units(amount, r):f}", "usdFeed": O.public(r)}
 
 
 def status(*, me, rpc, cap_units, session_file=SESSION, contract=None):

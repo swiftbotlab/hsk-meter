@@ -23,6 +23,12 @@ Flow (x402 v2): 1. GET with X-Payer: <address>  ->  402, PAYMENT-REQUIRED (base6
   Optional: sign the HSP-draft mandate offered in extensions["hsp-draft"] and send it in the payload's extensions; the
   answer then carries an adapter-signed receipt (one per payment) and the verifier's decision (served only on ACCEPT;
   a payment whose mandate is not accepted after settlement is refunded).
+HashKey ecosystem (reads only, server/oracle.py and server/kyc.py):
+  - APRO price feeds: the 402 carries extensions["usd-estimate"] (the price in USD at the APRO USDC/USD answer, with the
+    feed address, round id and round time), and the per-sale gas guard prices HSK at max(--hsk-usd, APRO HSK/USD), so
+    a feed can only make the guard stricter. A feed that is unavailable or stale changes nothing else.
+  - Compliant mode (off by default; --require-kyc LEVEL): quotes and settlements only for payers whose HashKey Chain KYC
+    SBT is valid at that level (isHuman); the 402 then says so in extensions["kyc-sbt"]. Refused before any payment.
 Keys: three files in --key-dir, each holding ONE value (provider.env: HKPW_PROVIDER_PK, adapter.env: HKPW_ADAPTER_PK,
 token.env: PAYWALL_TOKEN_KEY), mode 0600, never created, logged or printed by the server. The provider key is hot (it
 submits settlements and refunds); the payee key is never on this server, so a server compromise cannot withdraw
@@ -47,12 +53,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import chain as C        # noqa: E402
 import hsp_draft as HSP  # noqa: E402
+import kyc as K          # noqa: E402
+import oracle as O       # noqa: E402
 import protocol as P     # noqa: E402
 import state as ST       # noqa: E402
 from eth_abi import encode  # noqa: E402
 from eth_account import Account  # noqa: E402
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 ROOT = os.path.dirname(HERE)
 USDT = "0xf1b50ed67a9e2cc94ad3c477779e2d4cbfff9029"
 WHSK = "0xB210D2120d57b758EE163cFfb43e73728c471Cf1"
@@ -74,7 +82,8 @@ BAN_S = 86400               # a payer whose settlement reverted on-chain is refu
 SETTLE_GAS_WORST = 246_503  # observed on mainnet: 178,123 (warm storage) .. 246,503 (first payment, all storage cold)
 DEFAULTS = {"settle_per_min": 12, "payer_settle_per_min": 3, "refunds_per_payer_day": 2, "max_refund_attempts": 5,
             "settle_budget_wei": 2 * 10**18, "refund_budget_wei": 5 * 10**17, "hsk_usd": 0.10, "bind_host": "127.0.0.1",
-            "smoke_refund_address": None, "state_dir": None, "chain_id": P.CHAIN_ID, "network": "mainnet", "tx_wait_s": 90}
+            "smoke_refund_address": None, "state_dir": None, "chain_id": P.CHAIN_ID, "network": "mainnet", "tx_wait_s": 90,
+            "price_feeds": True, "kyc_min_level": None, "kyc_sbt": K.KYC_SBT}
 LOOPBACK = {"127.0.0.1", "::1"}
 KEY_VARS = {"provider.env": "HKPW_PROVIDER_PK", "adapter.env": "HKPW_ADAPTER_PK", "token.env": "PAYWALL_TOKEN_KEY"}
 
@@ -241,6 +250,8 @@ class Seller:
         self.low_balance = False
         self.provider_balance = None
         self.smoke = (cfg.get("smoke_refund_address") or "").lower() or None
+        self.feeds = O.Feeds(self.rpc) if cfg.get("price_feeds") else None
+        self.kyc = K.KycGate(self.rpc, cfg["kyc_min_level"], cfg["kyc_sbt"]) if cfg.get("kyc_min_level") else None
 
     def _on_spend(self, kind, wei):
         self.state.record("gas", kind=kind, wei=int(wei), day=ST.utc_day())
@@ -273,9 +284,40 @@ class Seller:
         self.exists[h] = time.monotonic()
         return None
 
+    def hsk_usd(self):
+        """HSK price for the gas guard: the operator's --hsk-usd, or the APRO HSK/USD answer when that is higher (a
+        current round only; read from the cache, never from the chain on the settlement path)."""
+        floor = float(self.cfg["hsk_usd"])
+        r = self.feeds.cached("HSK/USD") if self.feeds else None
+        return max(floor, float(r["price"])) if r else floor
+
     def max_cost_wei(self, price_units):
-        """Gas we accept to spend on one settlement: never more than the sale is worth (price in HSK at hsk_usd)."""
-        return int(price_units * 10**12 / float(self.cfg["hsk_usd"]))
+        """Gas we accept to spend on one settlement: never more than the sale is worth (price in HSK at hsk_usd())."""
+        return int(price_units * 10**12 / self.hsk_usd())
+
+    def usd_estimate(self, price_units):
+        """extensions["usd-estimate"] of a quote, or None while the APRO USDC/USD feed is unavailable."""
+        r = self.feeds.get("USDC/USD") if self.feeds else None
+        if not r:
+            return None
+        return {"priceUsd": f"{O.usd_of_units(price_units, r):f}", "source": O.SOURCE, "feed": O.public(r),
+                "note": "informational; the amount to pay is accepts[].amount in USDC.e base units"}
+
+    def kyc_refusal(self, payer, log, charged=False):
+        """None when compliant mode is off or `payer` passes; else the (status, body, headers) refusal."""
+        if not self.kyc:
+            return None
+        try:
+            ok, detail = self.kyc.check(payer)
+        except K.KycUnavailable as err:
+            log["err"] = ("kyc: " + str(err))[:120]
+            return 502, {"ok": False, "error": "chain_unavailable", "message": "the KYC SBT could not be read"}, {"Retry-After": "2"}
+        if ok:
+            return None
+        return 403, {"ok": False, "error": "kyc_required",
+                     "message": detail["reason"] + "; this seller accepts payments from KYC-verified addresses only"
+                                + ("" if charged else " (nothing was charged)"),
+                     "kyc": {**self.kyc.describe(), **detail}}, {}
 
     def _ctx(self, eid, payer, resource):
         return f"{P.DOMAIN_TAG}|{self.cfg['chain_id']}|{self.contract}|{eid}|{payer}|{resource}".encode()
@@ -350,6 +392,9 @@ class Seller:
             return 404, {"ok": False, "error": "not_found", "message": missing}, {}
         if not e["active"]:
             return 503, {"ok": False, "error": "endpoint_inactive"}, {"Retry-After": "60"}
+        refused = self.kyc_refusal(payer, log)
+        if refused:
+            return refused
         token = self.issue_token(eid, payer, resource)
         _, rid = P.compute_request_id(self.cfg["chain_id"], self.contract, eid, payer, resource, token)
         nonce = P.authorization_nonce(self.contract, eid, rid)
@@ -365,6 +410,13 @@ class Seller:
                                   resource=resource, contract=self.contract, endpoint_id=eid, price=e["price"],
                                   payer=payer, token=token, request_id=rid, nonce=nonce, max_timeout=MAX_TIMEOUT,
                                   explorer="https://hsk.blockscout.com", hsp_ext=hsp_ext)
+        if self.feeds:
+            self.feeds.get("HSK/USD")      # keeps the gas guard's reading current for the settlement that follows
+        usd = self.usd_estimate(e["price"])
+        if usd:
+            body.setdefault("extensions", {})["usd-estimate"] = usd
+        if self.kyc:
+            body.setdefault("extensions", {})["kyc-sbt"] = self.kyc.describe()
         return 402, body, {"PAYMENT-REQUIRED": P.b64json(body)}
 
     def parse_mandate(self, ext, payer, rid):
@@ -488,6 +540,9 @@ class Seller:
         except C.RpcError as err:
             log["err"] = str(err)[:120]
             return 502, {"ok": False, "error": "chain_unavailable"}, {"Retry-After": "2"}
+        refused = self.kyc_refusal(payer, log)       # compliant mode: checked again right before settling
+        if refused:
+            return refused
         wait = self.settle_rl.peek("all")
         if wait:
             return 503, {"ok": False, "error": "busy", "message": "too many settlements right now", "retryable": True}, {"Retry-After": str(wait)}
@@ -633,6 +688,11 @@ class Seller:
                    "explorer": "https://hsk.blockscout.com/tx/" + rec["tx"]}
         settle_resp = {"success": True, "transaction": rec["tx"], "network": P.NETWORK, "payer": payer}
         hdr = {"PAYMENT-RESPONSE": P.b64json(settle_resp)}
+        if self.kyc and rec.get("served", 0) == 0 and not rec.get("hsp"):
+            refused = self.kyc_refusal(payer, log, charged=True)   # e.g. a self-paid payment whose SBT lapsed
+            if refused:
+                return self.refund(rid, payer, payment, settle_resp, "KYC check failed: " + refused[1]["message"], log,
+                                   status=403, extra={"error": "kyc_required", "kyc": refused[1].get("kyc")})
         hsp_body, mh = None, None
         if mandate is not None:
             mh = HSP.mandate_hash(mandate, self.cfg["chain_id"])
@@ -904,13 +964,17 @@ def make_handler(seller):
                     status, body, h = 200, {"ok": True, "service": "hsk-meter", "version": VERSION,
                                             "network": P.NETWORK, "contract": seller.contract, "endpoints": seller.info(),
                                             "settler": seller.provider.address, "hspAdapter": seller.adapter.address,
-                                            "alerts": ["provider_low_balance"] if seller.low_balance else []}, {}
+                                            "alerts": ["provider_low_balance"] if seller.low_balance else [],
+                                            "priceFeeds": seller.feeds.status() if seller.feeds else None,
+                                            "gasGuardHskUsd": seller.hsk_usd(),
+                                            "compliance": seller.kyc.describe() if seller.kyc else {"required": False}}, {}
                 elif u.path == "/.well-known/x402":
                     status, body, h = 200, {"x402Version": P.X402_VERSION, "network": P.NETWORK, "asset": P.USDCE,
                                             "payTo": seller.contract, "schemes": ["exact", "hsk-paywall-tx"],
                                             "resources": [{"path": p + "?" + s["param"] + "=0x...", "endpointId": s["endpointId"],
                                                            "description": s["desc"]} for p, s in RESOURCES.items()],
-                                            "extensions": ["hsp-draft"]}, {}
+                                            "extensions": ["hsp-draft"] + (["usd-estimate"] if seller.feeds else [])
+                                                          + (["kyc-sbt"] if seller.kyc else [])}, {}
                 elif u.path == "/":
                     status, body, h = 200, {"service": "HSK Meter by Swift Bot Labs: HashKey Chain data, paid per request in USDC.e",
                                             "paid": [p for p in RESOURCES], "free": ["/health", "/.well-known/x402"],
@@ -976,6 +1040,11 @@ def reconciler(seller, every_s=60):
             seller.reconcile_once()
         except Exception as err:   # keep running; log the type only
             print(json.dumps({"reconciler_error": type(err).__name__}), flush=True)
+        if seller.feeds:
+            try:
+                seller.feeds.refresh()   # keeps the gas guard's HSK/USD reading current between quotes
+            except Exception as err:
+                print(json.dumps({"feed_refresh_error": type(err).__name__}), flush=True)
 
 
 def main():
@@ -991,7 +1060,12 @@ def main():
     ap.add_argument("--state-dir", default=os.environ.get("HSK_METER_STATE_DIR") or os.path.join(ROOT, "run"))
     ap.add_argument("--settle-budget-hsk", type=float, default=2.0)
     ap.add_argument("--refund-budget-hsk", type=float, default=0.5)
-    ap.add_argument("--hsk-usd", type=float, default=0.10, help="HSK price ceiling used for the per-sale gas guard")
+    ap.add_argument("--hsk-usd", type=float, default=0.10,
+                    help="HSK price floor for the per-sale gas guard (the APRO HSK/USD answer is used when higher)")
+    ap.add_argument("--no-price-feeds", action="store_true", help="do not read the APRO price feeds")
+    ap.add_argument("--require-kyc", default=None, choices=["basic", "advanced", "premium", "ultimate"],
+                    help="compliant mode: serve only payers whose HashKey Chain KYC SBT is valid at this level or higher")
+    ap.add_argument("--kyc-sbt", default=K.KYC_SBT, help="KYC SBT contract for --require-kyc")
     ap.add_argument("--no-egress-guard", action="store_true", help="local development only")
     ap.add_argument("--smoke-refund-address", default=None,
                     help="operator smoke test (loopback only): address-profile requests for this address are refunded")
@@ -1007,6 +1081,8 @@ def main():
         sys.exit("--smoke-refund-address needs an address and a loopback --host")
     if a.network == "mainnet" and a.no_egress_guard:
         sys.exit("the egress guard cannot be disabled on mainnet")
+    if not P.ADDR_RE.match(a.kyc_sbt):
+        sys.exit("bad --kyc-sbt address")
     if not a.no_egress_guard:
         import egress
         u = urllib.parse.urlparse(a.rpc)
@@ -1015,7 +1091,8 @@ def main():
     cfg = {"network": a.network, "rpc": a.rpc, "chain_id": a.chain_id, "contract": contract, "key_dir": a.key_dir,
            "state_dir": a.state_dir, "settle_budget_wei": int(a.settle_budget_hsk * 1e18),
            "refund_budget_wei": int(a.refund_budget_hsk * 1e18), "hsk_usd": a.hsk_usd, "bind_host": a.host,
-           "smoke_refund_address": a.smoke_refund_address}
+           "smoke_refund_address": a.smoke_refund_address, "price_feeds": not a.no_price_feeds and a.network == "mainnet",
+           "kyc_min_level": K.LEVELS[a.require_kyc] if a.require_kyc else None, "kyc_sbt": a.kyc_sbt}
     try:
         seller = Seller(cfg)
     except KeyFileError as e:
@@ -1027,8 +1104,12 @@ def main():
         sys.exit("no contract code at the configured address")
     if C.eth_call(seller.rpc, contract, "token()", [], [], ["address"])[0].lower() != P.USDCE.lower():
         sys.exit("contract does not settle in USDC.e")
+    if seller.kyc and len(seller.rpc("eth_getCode", [a.kyc_sbt, "latest"], tries=3)) <= 2:
+        sys.exit("no contract code at the KYC SBT address")
+    if seller.feeds:
+        seller.feeds.refresh()
     base, tip, _ = seller.sender.fees()
-    worst_units = SETTLE_GAS_WORST * (base + tip) / 1e18 * a.hsk_usd * 1e6
+    worst_units = SETTLE_GAS_WORST * (base + tip) / 1e18 * seller.hsk_usd() * 1e6
     for path, spec in RESOURCES.items():
         e = seller.endpoint(spec["endpointId"])
         if e["provider"] != seller.provider.address.lower():
@@ -1043,6 +1124,8 @@ def main():
                       "settler": seller.provider.address, "hspAdapter": seller.adapter.address,
                       "endpoints": seller.info(), "egressGuard": not a.no_egress_guard,
                       "smokeRefund": bool(a.smoke_refund_address),
+                      "priceFeeds": seller.feeds.status() if seller.feeds else None, "gasGuardHskUsd": seller.hsk_usd(),
+                      "compliance": seller.kyc.describe() if seller.kyc else {"required": False},
                       "journalRecords": len(seller.state.recs)}), flush=True)
     try:
         srv.serve_forever()

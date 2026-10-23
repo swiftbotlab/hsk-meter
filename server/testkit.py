@@ -40,6 +40,11 @@ S_GETPAY = sel("getPayment(bytes32)")
 S_BAL = sel("balanceOf(address)")
 S_AUTH = sel("authorizationState(address,bytes32)")
 S_TOKEN = sel("token()")
+S_LATEST = sel("latestRoundData()")
+S_DECIMALS = sel("decimals()")
+S_DESCRIPTION = sel("description()")
+S_ISHUMAN = sel("isHuman(address)")
+S_KYCINFO = sel("getKycInfo(address)")
 
 
 def revert(name_sig=None, args_types=(), args=(), message=None):
@@ -79,6 +84,11 @@ class FakeChain:
         self.block_refunds = False         # refunds revert with InsufficientCredit (e.g. the payee withdrew)
         self.stale_reads = False           # simulations lag one block: they miss the payment of the last tx
         self.last_rids = set()
+        self.feeds = {}                    # price feed address -> {description, decimals, roundId, answer, updatedAt, answeredInRound}
+        self.kyc_sbt = None                # KYC SBT address, and its records: holder -> {valid, level, status, createTime}
+        self.kyc = {}
+        self.fail_targets = set()          # eth_call to these addresses fails with an RPC error
+        self.call_targets = []             # the `to` of every eth_call, in order
 
     # ---- helpers for tests
     def fund(self, who, units):
@@ -144,9 +154,36 @@ class FakeChain:
         raise C.RpcError("RPC error: method not supported in FakeChain: " + method)
 
     # ---- views
+    def set_feed(self, address, description, price, decimals=8, age_s=60, round_id=(1 << 64) + 100, answered=None,
+                 updated_at=None):
+        self.feeds[address.lower()] = {"description": description, "decimals": decimals, "roundId": round_id,
+                                       "answer": int(round(price * 10**decimals)) if isinstance(price, float) else int(price),
+                                       "updatedAt": int(time.time()) - age_s if updated_at is None else updated_at,
+                                       "answeredInRound": round_id if answered is None else answered}
+
     def _call(self, call):
         to, data = call["to"].lower(), call["data"]
         s, args = data[:10], bytes.fromhex(data[10:])
+        self.call_targets.append(to)
+        if to in self.fail_targets:
+            raise C.RpcError("RPC unavailable: test failure")
+        if to in self.feeds:
+            f = self.feeds[to]
+            if s == S_LATEST:
+                return "0x" + encode(["uint80", "int256", "uint256", "uint256", "uint80"],
+                                     [f["roundId"], f["answer"], f["updatedAt"], f["updatedAt"], f["answeredInRound"]]).hex()
+            if s == S_DECIMALS:
+                return "0x" + encode(["uint8"], [f["decimals"]]).hex()
+            if s == S_DESCRIPTION:
+                return "0x" + encode(["string"], [f["description"]]).hex()
+            raise revert(message="unknown function")
+        if self.kyc_sbt and to == self.kyc_sbt.lower() and s in (S_ISHUMAN, S_KYCINFO):
+            who = decode(["address"], args)[0].lower()
+            k = self.kyc.get(who, {"valid": False, "level": 0, "status": 0, "createTime": 0})
+            if s == S_ISHUMAN:
+                return "0x" + encode(["bool", "uint8"], [k["valid"], k["level"] if k["valid"] else 0]).hex()
+            return "0x" + encode(["string", "uint8", "uint8", "uint256"],
+                                 ["x.hsk" if k["status"] else "", k["level"], k["status"], k["createTime"]]).hex()
         if to == self.contract and s in (S_PWA, S_REFUND, S_SETPRICE):
             self._simulate(call)
             return "0x"

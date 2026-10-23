@@ -11,7 +11,8 @@ HSK Meter sellers per request through it, inside limits the operator sets when s
    ops/state/mcp_runs.jsonl, separate from the CLI's journal)
 
 Tools
-  hsk_meter_quote   {url}                    the seller's x402 terms, checked against the spend guard; signs nothing
+  hsk_meter_quote   {url}                    the seller's x402 terms, checked against the spend guard, and the price
+                                             in USD from our own read of the APRO USDC/USD feed; signs nothing
   hsk_meter_pay     {url, hsp?, max_price?, new_purchase?}
                                              pays one request and returns the data plus on-chain proof (or the refund)
   hsk_meter_status  {}                       spend ledger (spent, reserved, cap, remaining), payments kept for a
@@ -79,7 +80,9 @@ TOOLS = [
     {"name": "hsk_meter_quote",
      "title": "Quote an HSK Meter request",
      "description": "Fetch the price an HSK Meter seller asks for one request (x402 v2 on HashKey Chain, paid in "
-                    "USDC.e) and check it against this server's spend guard. Signs and pays nothing.",
+                    "USDC.e) and check it against this server's spend guard. Also returns the price in USD (amountUsd) "
+                    "from this server's own read of the APRO USDC/USD price feed on HashKey Chain, with the feed "
+                    "address and round time. Signs and pays nothing.",
      "inputSchema": {"type": "object", "additionalProperties": False, "required": ["url"],
                      "properties": {"url": {"type": "string", "maxLength": MAX_URL,
                                             "description": "Full URL of the paid resource on an allowed seller origin, "
