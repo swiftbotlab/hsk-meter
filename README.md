@@ -11,6 +11,11 @@ By Swift Bot Labs, for the HashKey Chain Horizon Hackathon (India), track **Agen
 events straight from the public explorer in your browser: totals, USDC.e per day, refund rate and the latest payments,
 each linked to its transaction.
 
+**Demo video (2:54, English voice-over):** [watch in the browser](https://swiftbotlab.github.io/hsk-meter/hsk-meter-demo.mp4)
+or [download it from the v1.0.0 release](https://github.com/swiftbotlab/hsk-meter/releases/download/v1.0.0/hsk-meter-demo.mp4).
+It shows rows 24-26 of the live-proof table being paid on mainnet, the MCP buyer, a refund, the APRO price feeds and
+the KYC SBT compliant mode.
+
 | Component | Details |
 |---|---|
 | Network | HashKey Chain mainnet, chain id `177` |
