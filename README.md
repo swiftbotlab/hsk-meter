@@ -23,8 +23,8 @@ each linked to its transaction.
 ## Live proof on mainnet
 
 Every row is a real request made over HTTP through the seller in this repository, paid by the buyer client in
-this repository. Rows 1-5 ran v0.1 at the launch prices; rows 6-23 ran the hardened v0.2 inside its sandbox, and row
-23 was paid by an MCP client through `agent/mcp_server.py`. The [dashboard](https://swiftbotlab.github.io/hsk-meter/)
+this repository. Rows 1-5 ran v0.1 at the launch prices; rows 6-23 ran the hardened v0.2 inside its sandbox, and rows
+23 and 25 were paid by an MCP client through `agent/mcp_server.py`. Rows 24-26 ran v0.3.0 for the demo video. The [dashboard](https://swiftbotlab.github.io/hsk-meter/)
 recomputes the totals from the chain.
 
 | # | Request | Payment path | Transaction |
@@ -52,6 +52,9 @@ recomputes the totals from the chain.
 | 21 | tx check (a gas transfer), 0.025 | x402 `exact` | [`0x3573a1e7…`](https://hsk.blockscout.com/tx/0x3573a1e743dc982b3f93094696f0afa58886a6ad4a5f20181dcd1bb6cb714745) |
 | 22 | address profile (payee), 0.03 | x402 `exact` | [`0xfad63c27…`](https://hsk.blockscout.com/tx/0xfad63c27ba1cf8a89a2f2510340d7b8113bb64c890bf27e9dc403c1dee1d20d7) |
 | 23 | tx check (of #22), 0.025 | paid through the MCP tool `hsk_meter_pay`: x402 `exact` + HSP, verifier ACCEPT | [`0x8eea4457…`](https://hsk.blockscout.com/tx/0x8eea4457da07928d2f0d3ba465da6770188c4e1f4f9dc4a848d3d081294ddc37) |
+| 24 | address profile (settlement contract), 0.03 | x402 `exact` + HSP-style mandate, verifier ACCEPT, adapter pinned (recorded for the demo video) | [`0xe83e2679…`](https://hsk.blockscout.com/tx/0xe83e2679ea005d37f9721e94ac825ab84ae2da0150bb2d64abe61aa04c1f442f) |
+| 25 | tx check (of #24), 0.025 | paid through the MCP tool `hsk_meter_pay`: x402 `exact` + HSP, verifier ACCEPT; the same URL called again was re-served without a new payment | [`0xa28f6e62…`](https://hsk.blockscout.com/tx/0xa28f6e62612854937c464c43ef52333fc6f0ef97b8a950a0d716806586227205) |
+| 26 | address profile, 0.03 | x402 `exact`; delivery failed (operator test switch), automatic **refund** | paid [`0xf356a18a…`](https://hsk.blockscout.com/tx/0xf356a18abe71d3d4d3a898ff90986f1a4e63f7e2db1af652eea2de73f70a3ff0), refunded [`0x67066923…`](https://hsk.blockscout.com/tx/0x67066923291f05889e8ad9ad578e2773aead3fef5b99cd81384425e21ab6e961) |
 
 Setup transactions: deployment [`0xe08891e3…`](https://hsk.blockscout.com/tx/0xe08891e35a7197a62a5cb165a6e2dea194842f3dba00711fc65207cec120fe73),
 endpoint registrations [`0xec7dd370…`](https://hsk.blockscout.com/tx/0xec7dd370d753d746a264e3bd13acdca1733b323132e5cbe5184a573ec56f27b4)
@@ -214,7 +217,8 @@ under that payment unless it passes `new_purchase: true`. A call returns within 
 }
 ```
 
-Row 23 of the live-proof table was paid this way: quote, then `hsk_meter_pay` with HSP, over stdio from an MCP client.
+Rows 23 and 25 of the live-proof table were paid this way: quote, then `hsk_meter_pay` with HSP, over stdio from an MCP
+client (row 25 also shows a retry of the same URL re-served without a new payment).
 
 ## HashKey ecosystem
 
