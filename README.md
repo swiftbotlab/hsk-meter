@@ -76,6 +76,39 @@ because the seller pays the gas of every `exact` settlement.
 > Anyone can register endpoints on the contract, so contract-wide totals are not this service's numbers. Count only
 > endpoints `1` and `2` of provider `0x30CCc6d816854d1a66fBfecE15b1515a3E941160`.
 
+## Agent-to-agent (A2A): a seller that is also a buyer
+
+The track asks for agents that "discover, collaborate, and transact." `agent/agent_b.py` is a second seller —
+**Agent B**, a HashKey address *risk brief* at endpoint `3` (`GET /v1/hsk/risk-brief`, 0.08 USDC.e). To produce
+its answer, Agent B does not hold the raw data: it **pays Agent A** (this repository's seller, endpoint `1`)
+over the same x402 rail, from its own wallet, and composes a risk score on top. So **one** end-buyer request
+triggers **two** on-chain settlements between **distinct** wallets, with a margin for Agent B:
+
+- end-buyer `0x5270…A361` → Agent B's payee `0xD680…4A83` (endpoint 3, 0.08 USDC.e)
+- Agent B's buyer `0x7A03…4130` → Agent A's payee `0xA8A4…a48D` (endpoint 1, 0.03 USDC.e)
+
+Agent B reuses the seller, settlement, refund and x402/EIP-3009 code unchanged; it only swaps in endpoint 3 and
+pays upstream through `agent/buyer.py`. Endpoint 3 registered on-chain:
+[`0x5c8f458d…`](https://hsk.blockscout.com/tx/0x5c8f458da639d2852c5ee0a0ef5c246005df8c80945ed061b9787a69e212bcfc).
+
+| A2A run | risk brief on | end-buyer → Agent B (ep3) | Agent B → Agent A (ep1) |
+|---|---|---|---|
+| 1 | the settlement contract | [`0x7771c755…`](https://hsk.blockscout.com/tx/0x7771c755d0c1f026089521f6bd30ae58ded8aa8250ff8bfca5922f9cecceec85) | [`0xf8df895c…`](https://hsk.blockscout.com/tx/0xf8df895c55f1cc63b9bb80429ecea1cb758e386d71020599aa518fea80fcd4b4) |
+| 2 | an EOA | [`0x29b0c35a…`](https://hsk.blockscout.com/tx/0x29b0c35acdfcbe4d074fc52bb713cdeb12acc87e74d0f169380c401f4a2653df) | [`0x65572b77…`](https://hsk.blockscout.com/tx/0x65572b77697029f73775eed4efb22640908c5c5663330b64ad91ee350d14eff4) |
+| 3 | the APRO USDC/USD feed | [`0xa69e680a…`](https://hsk.blockscout.com/tx/0xa69e680a7adbe8f0910859e46eaa57b1b3ec4434aa63072c575ad3ac22a8e4f6) | [`0x0e050d7e…`](https://hsk.blockscout.com/tx/0x0e050d7ec20c76eaeb6699cf0417dc63f936751ace082ed58a6b31da4a20f630) |
+
+**Composed refund.** When Agent A cannot deliver, it refunds Agent B; Agent B then cannot deliver either, so it
+refunds the end-buyer. Both levels unwound on mainnet in one run, and both wallets ended exactly where they
+started:
+
+| step | paid | refunded |
+|---|---|---|
+| end-buyer → Agent B (ep3) | [`0xee9845cb…`](https://hsk.blockscout.com/tx/0xee9845cb16222270a985b456429c570c93aa1438557b681dd57d06ca7ca112fe) | [`0xf407cf85…`](https://hsk.blockscout.com/tx/0xf407cf858764e189aa3c4417e1f2551b7449c03e710b91fde07506a85abd0d6a) |
+| Agent B → Agent A (ep1) | [`0xddedc886…`](https://hsk.blockscout.com/tx/0xddedc8869549d0be05495087b4d7526f2f1c1610bd10bfacbb3fae17171d98b3) | [`0xf8aa291d…`](https://hsk.blockscout.com/tx/0xf8aa291d90e9a937dcff64eb123ec1b0db49c4ce54824f6d924560992e3a91b7) |
+
+Run it yourself with `agent/A2A_DEMO.md`. The four A2A endpoint-1 settlements above are included in endpoint 1's
+on-chain count (now 18 paid / 4 refunded); endpoint 3 is Agent B's own provider and is counted separately.
+
 ## How a request is paid
 
 ```mermaid
@@ -142,13 +175,16 @@ The buyer needs USDC.e on HashKey Chain and no HSK (the seller pays the gas of `
 ```sh
 echo "HKPW_BUYER_PK=0x..." > buyer.env && chmod 600 buyer.env      # your buyer key, kept out of the repo
 
-python3 agent/buyer.py "https://SELLER/v1/hsk/address-profile?address=0x78C8476772BC209C3df09Da5e129d0879cd57F8c" \
+python3 agent/buyer.py "http://localhost:8402/v1/hsk/address-profile?address=0x78C8476772BC209C3df09Da5e129d0879cd57F8c" \
   --key-file buyer.env \
   --expect-provider 0x30CCc6d816854d1a66fBfecE15b1515a3E941160 \
   --expect-payee 0xA8A49A6Ca872D54a8FD5FB121139De9bff62a48D \
   --max-price 0.05 --session-cap 0.20 \
   --hsp --pin-adapter 0x4D281e0a98fD40Bb824F88D5e037bd8d03C4403a
 ```
+
+`http://localhost:8402` is the seller you run yourself (see "Seller" below and "Try it yourself"); there is no
+always-on public endpoint — the seller holds a hot settlement key, so it runs on demand, not as a public service.
 
 The buyer refuses to sign unless the quote is for chain 177, USDC.e, this contract, the pinned provider and payee,
 and the on-chain price, and unless the amount fits under `--max-price` and the session cap. It then verifies the
@@ -185,6 +221,27 @@ and the on-chain price, and unless the amount fits under `--max-price` and the s
    `--require-kyc basic|advanced|premium|ultimate` (compliant mode, off by default), `--kyc-sbt 0x...`,
    `--no-price-feeds`, `--hsk-usd` (the gas guard's HSK price floor).
 
+### Try it yourself
+
+There is no always-on public endpoint (the seller holds a hot settlement key), so you run the seller and pay it
+yourself — one terminal each. Free routes need no payment: `curl http://localhost:8402/.well-known/x402` returns
+the full x402 terms, and `GET /health` the live endpoint prices. A paid call looks like this (real mainnet
+response, trimmed):
+
+```
+$ python3 agent/buyer.py "http://localhost:8402/v1/hsk/address-profile?address=0x78C8476772BC209C3df09Da5e129d0879cd57F8c" ... --hsp
+{
+  "data": {"address": "0x78c8…57f8c", "chainId": 177, "type": "contract", "codeSize": 8726, "nonce": 1,
+           "balances": {"HSK": "0.000000", "USDC.e": "0.620000", "USDT": "0.000000", "WHSK": "0.000000"},
+           "block": 29339139, "explorer": "https://hsk.blockscout.com/address/0x78c8…57f8c"},
+  "payment": {"endpointId": 1, "amount": "30000", "tx": "0x…", "network": "eip155:177"},
+  "hsp": {"decision": {"outcomeClass": "ACCEPT", ...}},
+  "delivered": true, "payment_state": "settled"
+}
+```
+
+For the two-hop A2A flow (Agent B pays Agent A), see `agent/A2A_DEMO.md`.
+
 ## Use it from any MCP client
 
 `agent/mcp_server.py` runs the buyer as an MCP server over stdio (no extra dependencies), so any MCP-capable agent
@@ -212,7 +269,7 @@ under that payment unless it passes `new_purchase: true`. A call returns within 
       "command": "python3",
       "args": ["/path/to/hsk-meter/agent/mcp_server.py",
                "--key-file", "/path/to/buyer.env",
-               "--allow-origin", "https://SELLER",
+               "--allow-origin", "http://localhost:8402",
                "--expect-provider", "0x30CCc6d816854d1a66fBfecE15b1515a3E941160",
                "--expect-payee", "0xA8A49A6Ca872D54a8FD5FB121139De9bff62a48D",
                "--pin-adapter", "0x4D281e0a98fD40Bb824F88D5e037bd8d03C4403a",
