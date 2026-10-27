@@ -13,3 +13,4 @@ REVIEW_2B.md
 ops/*.py
 ops/state/*.jsonl
 run/
+ops/state/hsp_payer_ledger.json

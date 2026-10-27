@@ -166,6 +166,41 @@ off the network targets become reachable.
   and one whose SBT lapsed between quote and a self-paid payment is refunded on-chain before anything is served. The
   SBT address is not source-verified on the explorer (see the README for how it was checked); `--kyc-sbt` overrides it.
 
+## HSP gateway rail (`server/hsp_gateway.py`, `server/hsp_merchant_agent.py`, `agent/hsp_payer.py`)
+
+- Off by default. It switches on only when `secrets/hsp/hsp.env` holds `APP_KEY`, `APP_SECRET` and `BASE_URL`. That
+  file and the merchant private key must be regular files (no symlinks), owned by the service user, mode `0600`, or
+  they are refused. `BASE_URL` must be one of the three documented hosts over https. Staging and production take
+  mainnet tokens and are refused unless `ALLOW_MAINNET=1` is set on purpose; a mainnet network on the QA gateway is
+  refused too.
+- Secrets never leave the process: no logging of `app_secret`, the merchant key, JWTs or signing strings; `repr()` of
+  the key and config objects shows public parts only. The ES256K signer (eth-keys' secp256k1 code) derives
+  its nonces deterministically, RFC 6979-style (HMAC-DRBG over the key and the digest), so no RNG is involved.
+- Outgoing calls: no redirects, 15 s timeouts, 1 MB response cap, strict JSON (no duplicate keys, no floats, no
+  NaN). The receiving agent installs the egress guard for the data RPC host, the gateway host and, with
+  `--verify-onchain`, the two testnet RPC hosts.
+- Receiving agent: loopback only. Rate limits: 60 quotes per minute per client, 10 new gateway orders per minute per
+  payer, 60 per minute in total, and 30 paid-status checks per minute per client. An unpaid open order is re-offered
+  instead of creating another. It serves only when a payment record for THIS order matches: cart id,
+  `payment_request_id`, token, payee, chain, an amount of at least 99% of the USD total, a tx hash, and the payer equal
+  to `X-Payer`, which must prove it holds that wallet: `X-HSP-Proof` is an EIP-191 signature by `X-Payer` over the
+  flow id and the resource (the flow id alone is not a secret: it is in the `payment_url`). The record comes from a verified webhook or the HMAC-signed merchant query, and with
+  `--verify-onchain` the token `Transfer` must also be found in the transaction itself. A paid order is served at most
+  3 times within 1 h. No refund API is documented, so a paid order whose data source fails stays servable rather than
+  being dropped.
+- Webhooks: 64 KB cap, `t=`/`v1=` parsed strictly, 300 s tolerance, HMAC over the raw bytes compared in constant
+  time, documented statuses only. The 0600 journal applies each delivery at most once: replays of a captured
+  delivery, retries, late lower statuses and anything after a terminal state change nothing.
+- Payment agent: nothing is fetched from, and nothing is signed for, a gateway that is not pinned. The merchant key
+  is pinned out of band; a key inside the offer is only compared. The JWT must be ES256K and verify, and `cart_hash`
+  must equal the SHA-256 of the canonical cart. The documented cart rules must hold, and the cart must be for the
+  exact resource requested. The token must be in the documented table with an on-chain-verified EIP-712 domain
+  (EIP-3009 only: Permit2's spender is undocumented). Network, payee, per-payment maximum, budget and payment count
+  are AP2-style constraints. The amount is reserved in a 0600 ledger before signing, and one flow gets one signature
+  (a retry re-uses it). The authorization is valid for 5 minutes at most and never past the cart's expiry. Against a
+  real gateway the undocumented submission route is never guessed: it needs an explicit `--submit-path`. The ledger
+  keeps the signed mandate, which can move exactly that amount to that payee, so it is kept owner-only.
+
 ## Known limitations
 
 All three are low severity and not fixed yet. The first and the third never cost the buyer an extra payment; the
