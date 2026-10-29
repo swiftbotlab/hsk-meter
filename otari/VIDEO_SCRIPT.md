@@ -3,6 +3,7 @@
 Video: [`otari/otari-demo.mp4`](otari-demo.mp4) (1920x1080, captions + voice-over). Everything on screen is real: the
 Otari dashboard of our organization, the agent console making paid calls on HashKey Chain mainnet on 2026-10-29,
 and the HashKey Chain explorer. The console is a local page that runs `agent/buyer.py`'s `quote()` and `buy()`.
+Counts on the slides (28 tests, 10 paid calls) are as of the recording; OTARI.md has the current ones.
 
 | Time | On screen | Caption | Voice-over |
 |---|---|---|---|

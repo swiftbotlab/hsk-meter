@@ -327,6 +327,103 @@ class Refunds(unittest.TestCase):
         self.assertEqual((a["policy"], a["fallback"]), ("hsk-answer-drill", True))
 
 
+class ReviewFixes(unittest.TestCase):
+    """Regressions for the 2026-10-29 security review of the AI endpoint."""
+
+    def q(self, i):
+        return "q=" + urllib.parse.quote_plus(f"what is the hsk balance of 0x{i:040x} today?")
+
+    def test_quote_time_screens_are_bounded_per_ip_and_deferred_to_settlement(self):
+        e = Env()
+        for i in range(AI.QUOTE_SCREENS_PER_IP_HOUR):
+            st, _, _ = e.quote(self.q(i))
+            self.assertEqual(st, 402)
+        n = len(e.otari.calls)
+        st, body, _ = e.quote(self.q(999))                        # over the per-IP bound: quoted, not screened
+        self.assertEqual(st, 402)
+        self.assertEqual(len(e.otari.calls), n)
+        e.otari.guard = "Safety: Unsafe\nCategories: Violent"     # the deferred screen refuses it before settlement
+        hdr = e.header(body)
+        st, body, _ = e.s.handle_paid(AI.AI_PATH, self.q(999), {"PAYMENT-SIGNATURE": hdr}, "1.1.1.1", {})
+        self.assertEqual((st, body["error"]), (422, "question_refused"))
+        self.assertEqual(e.ch.sent, [])                           # nothing settled, nothing charged
+
+    def test_out_of_scope_text_is_refused_without_any_model_call(self):
+        e = Env()
+        st, body, _ = e.quote("q=" + urllib.parse.quote_plus("please write me a long poem about autumn leaves"))
+        self.assertEqual((st, body["error"]), (422, "out_of_scope"))
+        self.assertEqual(e.otari.calls, [])
+
+    def test_unverifiable_answer_leaks_no_model_text_and_repeat_offenders_are_not_quoted(self):
+        e = Env()
+        e.otari.verify = {"verdict": "fail", "answer": "SECRET DRAFT", "issues": ["SECRET DRAFT copied here"]}
+        for i in range(AI.VERIFY_FAILS_PER_PAYER_DAY):
+            _, _, (st, body, _) = e.buy(self.q(i))
+            self.assertEqual((st, body["reason"]), (422, "ai_unverified"))
+            self.assertNotIn("SECRET", json.dumps(body))
+        st, body, _ = e.quote(self.q(50))
+        self.assertEqual((st, body["error"]), (429, "too_many_unverified"))
+
+    def test_unexpected_failure_after_payment_is_refunded(self):
+        e = Env()
+        e.otari.verify = {"verdict": "pass", "answer": "", "issues": {"not": "a list"}}
+        _, quote, (st, body, _) = e.buy()
+        self.assertEqual(st, 200)                                # malformed issues are ignored, not fatal
+        orig = e.otari.chat
+
+        def crash(key, b, idempotency_key=None, timeout=None):
+            if b["model"] == "hsk-verify":
+                raise ZeroDivisionError("unexpected")
+            return orig(key, b, idempotency_key, timeout)
+        e.otari.chat = crash
+        _, quote, (st, body, _) = e.buy(self.q(7))
+        self.assertEqual((st, body["reason"]), (502, "ai_internal"))
+        self.assertTrue(body["refund"]["refunded"])
+
+    def test_screening_failure_after_payment_does_not_mark_the_buyer_exhausted(self):
+        e = Env()
+        e.ai.presettle = lambda q, payer=None: None
+        S.PRESETTLE[AI.AI_PATH] = lambda q, payer, log: None
+        st, body, _ = e.quote()
+        e.ai.screens = AI._Cache(AI.SCREEN_TTL)                  # the cache lost the quote-time screen
+        e.otari.fail["hsk-guard"] = OT.OtariError("budget", 403, "budget_exceeded")
+        hdr = e.header(body)
+        st, body, _ = e.s.handle_paid(AI.AI_PATH, Q, {"PAYMENT-SIGNATURE": hdr}, "1.1.1.1", {})
+        self.assertEqual((st, body["reason"]), (502, "ai_unavailable"))
+        self.assertTrue(body["refund"]["refunded"])
+        self.assertFalse(e.ai.budget_known_exhausted(e.buyer.address.lower()))
+        S.PRESETTLE[AI.AI_PATH] = lambda q, payer, log: e.ai.presettle(q, payer)
+
+    def test_pool_buyers_get_no_paid_tools_and_code_execution_is_capped(self):
+        e = Env(dedicated=False)
+        e.otari.route = {"in_scope": True, "needs_web": True, "needs_math": True}
+        e.buy()
+        ans = next(c for c in e.otari.calls if c["model"] == "hsk-answer")["body"]
+        self.assertNotIn("tools", ans)
+        e2 = Env()
+        e2.otari.route = {"in_scope": True, "needs_web": False, "needs_math": True}
+        e2.buy()
+        ans = next(c for c in e2.otari.calls if c["model"] == "hsk-answer")["body"]
+        self.assertEqual(ans["tools"], [{"type": "otari_code_execution", "max_uses": 1}])
+
+    def test_invisible_characters_and_non_https_sources_are_dropped(self):
+        dirty = "a\U000e0041\u2028b\ufeffc\u2060d\ufe0fe\x85f\ng"
+        self.assertEqual(AI._clip(dirty, 100), "abcdef\ng")
+        e = Env()
+        e.otari.route = {"in_scope": True, "needs_web": True, "needs_math": False}
+        orig = e.otari.chat
+
+        def with_sources(key, b, idempotency_key=None, timeout=None):
+            r = orig(key, b, idempotency_key, timeout)
+            if b["model"] == "hsk-answer":
+                r["toolCalls"] = [{"type": "web_search", "status": "completed",
+                                   "sources": ["javascript:alert(1)", "http://plain.example/", "https://ok.example/\u200bx"]}]
+            return r
+        e.otari.chat = with_sources
+        _, _, (st, body, _) = e.buy()
+        self.assertEqual(body["data"]["sources"], ["https://ok.example/x"])
+
+
 # ---------------------------------------------------------------------------- the HTTP client against loopback
 class _Gateway(http.server.BaseHTTPRequestHandler):
     script = {}

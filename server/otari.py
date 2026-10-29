@@ -203,18 +203,25 @@ class Otari:
             cost = float(usage.get("cost_usd") or 0)
         except (TypeError, ValueError):
             cost = 0.0
-        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(msg, dict):
+            raise OtariError("bad_response", status, detail="not a chat completion", request_id=hdr.get("otari-request-id"))
+        content = msg.get("content")
         tool_calls = []
-        for t in (j.get("otari_tool_calls") or [])[:10]:
+        reported = j.get("otari_tool_calls") if isinstance(j.get("otari_tool_calls"), list) else []
+        for t in reported[:10]:
             if isinstance(t, dict):
+                srcs = t.get("sources") if isinstance(t.get("sources"), list) else []
                 tool_calls.append({"type": str(t.get("type", ""))[:40], "status": str(t.get("status", ""))[:20],
                                    "query": str(t.get("query", ""))[:200] if t.get("query") else None,
-                                   "sources": [str(s.get("url", ""))[:300] for s in (t.get("sources") or [])[:5]
-                                               if isinstance(s, dict)]})
+                                   "sources": [str(s.get("url", ""))[:300] for s in srcs[:5] if isinstance(s, dict)]})
+        try:
+            attempts = int(hdr.get("otari-attempt-count", "")) if str(hdr.get("otari-attempt-count", "")).isdecimal() else None
+        except ValueError:
+            attempts = None
         return {"content": content if isinstance(content, str) else "", "model": j.get("model"),
                 "provider": hdr.get("otari-provider"), "servedModel": hdr.get("otari-model"),
                 "fallback": hdr.get("otari-fallback") == "true",
-                "attempts": int(hdr["otari-attempt-count"]) if str(hdr.get("otari-attempt-count", "")).isdigit() else None,
+                "attempts": attempts,
                 "requestId": hdr.get("otari-request-id"), "costUsd": cost,
                 "usage": {k: usage.get(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens")},
                 "toolCalls": tool_calls, "ms": int((time.monotonic() - t0) * 1000)}

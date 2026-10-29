@@ -229,7 +229,8 @@ def tx_receipt(rpc, h):
 
 
 WORK = {"/v1/hsk/address-profile": address_profile, "/v1/hsk/tx-receipt": tx_receipt}
-PRECHECK = {}   # path -> fn(arg, payer, log): None to quote, or (status, body, headers) to refuse (nothing charged)
+PRECHECK = {}   # path -> fn(arg, payer, log, ip): None to quote, or (status, body, headers) to refuse (nothing charged)
+PRESETTLE = {}  # path -> fn(arg, payer, log): checked right before a signed, funded payment is settled (same contract)
 
 
 def network_facts(contract, rpc_url, chain_id=P.CHAIN_ID):
@@ -247,10 +248,17 @@ def install_ai(ai, endpoint_id):
                              "example": "what+is+the+usdc.e+balance+of+0x...", "desc": AI.DESC}
 
     def work(rpc, q, ctx):
-        return ai.work(rpc, q, ctx)
+        try:
+            return ai.work(rpc, q, ctx)
+        except (Undeliverable, NotFound, C.RpcError):
+            raise
+        except Exception as err:         # never keep a payment undelivered: anything unexpected is refunded
+            print(json.dumps({"ai_internal_error": type(err).__name__}), flush=True)
+            raise Undeliverable("ai_internal", "the AI endpoint failed while answering", 502)
     work.wants_ctx = True
     WORK[AI.AI_PATH] = work
-    PRECHECK[AI.AI_PATH] = lambda q, payer, log: ai.precheck(q, payer)
+    PRECHECK[AI.AI_PATH] = lambda q, payer, log, ip=None: ai.precheck(q, payer, ip)
+    PRESETTLE[AI.AI_PATH] = lambda q, payer, log: ai.presettle(q, payer)
 
 
 # ------------------------------------------------------------------ the seller
@@ -430,7 +438,7 @@ class Seller:
             return refused
         pre = PRECHECK.get(path)
         if pre:
-            refused = pre(arg, payer, log)
+            refused = pre(arg, payer, log, ip)
             if refused:
                 log["refused"] = refused[1].get("error")
                 return refused
@@ -582,6 +590,12 @@ class Seller:
         refused = self.kyc_refusal(payer, log)       # compliant mode: checked again right before settling
         if refused:
             return refused
+        pre = PRESETTLE.get(path)                    # e.g. the AI endpoint's screen: signed, funded payer, unsettled
+        if pre:
+            refused = pre(arg, payer, log)
+            if refused:
+                log["refused"] = refused[1].get("error")
+                return refused
         wait = self.settle_rl.peek("all")
         if wait:
             return 503, {"ok": False, "error": "busy", "message": "too many settlements right now", "retryable": True}, {"Retry-After": str(wait)}

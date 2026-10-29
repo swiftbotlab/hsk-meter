@@ -575,6 +575,79 @@
    "note": "video take D: a harmful question: 422 question_refused by the Qwen3Guard screen at the quote, nothing charged",
    "httpStatus": 422,
    "payment": null
+  },
+  {
+   "run": "final_check",
+   "note": "after the security-review fixes (bounded screening, presettle screen): served",
+   "httpStatus": 200,
+   "payment": "settled",
+   "question": "what is the latest block number on hashkey chain, and what is the usdc.e contract address there?",
+   "requestId": "0x5270fe01fd3d6148b687da0b5693b0425cfca361c2025ddb3e493fd7b82f2e16",
+   "settlementTx": "https://hsk.blockscout.com/tx/0x9321651f5f7879cddd347331c31950e615816c7fabd781ca51581d79d5ace599",
+   "refundTx": null,
+   "answer": "Latest block number on HashKey Chain (chain ID 177): 29,466,881.  \nUSDC.e contract address on HashKey Chain: 0x054ed45810DbBAb8B27668922D110669c9D88D0a.",
+   "verdict": "pass",
+   "otari": {
+    "tier": "dedicated",
+    "screen": {
+     "guard": {
+      "verdict": "safe",
+      "categories": "None"
+     },
+     "route": {
+      "in_scope": true,
+      "needs_web": false,
+      "needs_math": false
+     }
+    },
+    "calls": [
+     {
+      "role": "guard",
+      "policy": "hsk-guard",
+      "servedModel": "Qwen3Guard-Gen-8B",
+      "provider": "ovhcloud",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0,
+      "requestId": "6e70484d-bff4-42d9-9e96-c9885f77bdb6",
+      "ms": 1883
+     },
+     {
+      "role": "route",
+      "policy": "hsk-route",
+      "servedModel": "ministral-3b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 1.6e-05,
+      "requestId": "502cd636-ff52-406f-a0f3-bdf6be4ea55e",
+      "ms": 1472
+     },
+     {
+      "role": "answer",
+      "policy": "hsk-answer",
+      "servedModel": "openai/gpt-oss-120b",
+      "provider": "deepinfra",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0.00032,
+      "requestId": "a8905b46-0e94-48c6-a94f-2ad0b39ccd8a",
+      "ms": 12184
+     },
+     {
+      "role": "verify",
+      "policy": "hsk-verify",
+      "servedModel": "ministral-8b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0.0001,
+      "requestId": "69f9999e-a177-4b1d-9d75-4dd73fe16377",
+      "ms": 2233
+     }
+    ],
+    "buyerCostUsd": 0.00042
+   }
   }
  ]
 }

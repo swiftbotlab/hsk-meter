@@ -16,9 +16,9 @@ gateway (`https://otari.ai/api/v1`, OpenAI-compatible).
 | First commit where Otari came in | [`e99914c`](https://github.com/swiftbotlab/hsk-meter/commit/e99914c6d95676de05f4794fa9a433c7b1d4fecb) Otari gateway client |
 | Code | [`server/otari.py`](server/otari.py) (client, key ring), [`server/ai_ask.py`](server/ai_ask.py) (the endpoint), hooks in [`server/seller.py`](server/seller.py) |
 | Otari configuration | [`otari/config.json`](otari/config.json): keys, budgets, ceilings, routing policies, MCP server, web search |
-| Live proof | [`otari/live_runs.json`](otari/live_runs.json): 10 paid calls on mainnet (3 refunded) and 3 refusals before payment, with transactions |
+| Live proof | [`otari/live_runs.json`](otari/live_runs.json): 11 paid calls on mainnet (3 refunded) and 3 refusals before payment, with transactions |
 | Demo video | [`otari/otari-demo.mp4`](otari/otari-demo.mp4) (4:24, captions and voice-over), script in [`otari/VIDEO_SCRIPT.md`](otari/VIDEO_SCRIPT.md) |
-| Tests | [`server/test_ai.py`](server/test_ai.py): 28 offline tests (scripted gateway + loopback HTTP client), in CI |
+| Tests | [`server/test_ai.py`](server/test_ai.py): 35 offline tests (scripted gateway + loopback HTTP client), in CI |
 | Feedback | [`OTARI_FEEDBACK.md`](OTARI_FEEDBACK.md) |
 
 ## What happens to one paid question
@@ -115,6 +115,7 @@ Endpoint 4 was registered in [`0x112bcfb8…`](https://hsk.blockscout.com/tx/0x1
 | video take A | served, again DeepInfra -> Nebius (2 attempts), balance already includes the payment | [settle](https://hsk.blockscout.com/tx/0x5bfd43cd6dd77ce94ed77513802d66e4f15b7b23ffc4282446c007e4d2788912) |
 | video take B | Agent B over its budget: Otari `budget_exceeded`, refunded | [settle](https://hsk.blockscout.com/tx/0x18d0aa9e3f1fbed6dba8d3e93dea7d4a1ef9e43f9e269134ba6b6efa4c174abc), [refund](https://hsk.blockscout.com/tx/0xb3ed625ab63437071cbc2d546c3a0f836fabb21415171dfc00f2ca5a96ad9be8) |
 | video takes C, D | over-budget buyer refused at the quote (429); harmful question refused by the guard (422); nothing charged | none |
+| final_check | after the security-review fixes: served (latest block via Blockscout MCP, USDC.e contract from the facts) | [settle](https://hsk.blockscout.com/tx/0x9321651f5f7879cddd347331c31950e615816c7fabd781ca51581d79d5ace599) |
 
 ## Run it
 
@@ -148,8 +149,16 @@ The paid resource is the raw query string, so the request id binds the exact que
 - The question, tool output, web pages and token or contract names are data for the models, never instructions for
   the seller; the models have no keys, files or wallet. Answers are cleaned of markdown and invisible or bidi
   characters before they are sold.
-- Screening runs before the quote on the seller's own key, so a spam of refused questions costs the buyer nothing and
-  the seller only the free guard model plus a cent-fraction router call, under the screening key's ceiling.
+- Screening is free to the caller, so it is bounded: a keyword pre-filter with no model call, then at most 20 new
+  screened questions per IP per hour, 600 per day and 4 at once at the quote. Past those bounds the quote is given
+  unscreened and the screen runs right before settlement, after the payer has signed a valid authorization from a
+  funded account (and under the seller's per-payer settlement limit). Nothing is charged for a refused question
+  either way. At most 6 paid answers run at once.
+- A refund for an answer that failed verification returns a fixed message, never model text (the verifier sees the
+  draft); a payer with two such refunds in a day is not quoted again that day. Buyers on the shared pool key get no
+  paid tools; code execution and web search are declared with `max_uses: 1`. Anything unexpected after payment is
+  refunded (`ai_internal`). These came from an independent security review of the branch; `ReviewFixes` in
+  `server/test_ai.py` covers each one, and each test fails with its fix removed.
 
 ## What is not done
 
