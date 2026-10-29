@@ -9,6 +9,10 @@ checked the adapter-signed receipt against the buyer's signed mandate.
 
 By Swift Bot Labs, for the HashKey Chain Horizon Hackathon (India), track **Agent Payments & A2A Settlement**.
 
+**Watch the overview on YouTube (1:17):** [youtu.be/t2yyd76qRlc](https://youtu.be/t2yyd76qRlc): a paid call on
+mainnet, an automatic refund, one agent paying another, and the HSP rail, with captions. The full 2:54 walkthrough
+is under [At a glance](#at-a-glance).
+
 ## Track 2 fit
 
 The track asks for "the A2A scenario combined with HSP's API interface, where the Payment Agent constructs a Payment
@@ -41,6 +45,8 @@ sentence lives in this repository, and how far it has been proven.
 **Live dashboard:** [swiftbotlab.github.io/hsk-meter](https://swiftbotlab.github.io/hsk-meter/) reads the contract's
 events straight from the public explorer in your browser: totals, USDC.e per day, refund rate and the latest payments,
 each linked to its transaction.
+
+**Overview video (1:17, captions):** [YouTube](https://youtu.be/t2yyd76qRlc).
 
 **Demo video (2:54, English voice-over):** [watch in the browser](https://swiftbotlab.github.io/hsk-meter/hsk-meter-demo.mp4)
 or [download it from the v1.0.0 release](https://github.com/swiftbotlab/hsk-meter/releases/download/v1.0.0/hsk-meter-demo.mp4).
