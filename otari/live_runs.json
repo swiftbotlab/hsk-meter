@@ -404,6 +404,177 @@
     ],
     "buyerCostUsd": 0.010347
    }
+  },
+  {
+   "run": "console-1309",
+   "note": "video take 1: served, but the answer used the balance one block before the payment (load-balanced RPC lag); fixed in 28f7c2d. DeepInfra failed and Otari fell over to Nebius on its own",
+   "httpStatus": 200,
+   "payment": "settled",
+   "question": "how much usdc.e and hsk does 0x5270fe01fd3d6148b687da0b5693b0425cfca361 hold, and how many 0.03 usdc.e questions can it still pay for?",
+   "requestId": "0x5270fe01fd3d6148b687da0b5693b0425cfca361cbb843f5730259a7b935a69e",
+   "settlementTx": "https://hsk.blockscout.com/tx/0x785fbe686cb817d37020d12b49d64c83a200fffbd9f8e94b732f0783b6d32b94",
+   "refundTx": null,
+   "sellerMessage": null,
+   "answer": "USDC.e balance: 0.236206 USDC.e  \nHSK balance: 1.277589 HSK  \n\n0.236206 USDC.e \u00f7 0.03 USDC.e \u2248 7.87 \u2192 the address can still pay for 7 full 0.03 USDC.e questions.",
+   "verdict": "pass",
+   "otari": {
+    "tier": "dedicated",
+    "screen": {
+     "guard": {
+      "verdict": "safe",
+      "categories": "None"
+     },
+     "route": {
+      "in_scope": true,
+      "needs_web": false,
+      "needs_math": true
+     }
+    },
+    "calls": [
+     {
+      "role": "guard",
+      "policy": "hsk-guard",
+      "servedModel": "Qwen3Guard-Gen-8B",
+      "provider": "ovhcloud",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0,
+      "requestId": "14647a7d-c94e-4717-9ba1-ff8a62843960",
+      "ms": 1608
+     },
+     {
+      "role": "route",
+      "policy": "hsk-route",
+      "servedModel": "ministral-3b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 2e-05,
+      "requestId": "fb338051-276a-44ea-ac5b-6311c2b43d6f",
+      "ms": 1270
+     },
+     {
+      "role": "answer",
+      "policy": "hsk-answer",
+      "servedModel": "openai/gpt-oss-120b",
+      "provider": "nebius",
+      "fallback": true,
+      "attempts": 2,
+      "costUsd": 0.000417,
+      "requestId": "1325940c-56a4-4ce4-9674-94c5cd1f2ae5",
+      "ms": 5155
+     },
+     {
+      "role": "verify",
+      "policy": "hsk-verify",
+      "servedModel": "ministral-8b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0.000138,
+      "requestId": "25b06e64-6e0e-45af-8801-d6efeb151177",
+      "ms": 2459
+     }
+    ],
+    "buyerCostUsd": 0.000555
+   }
+  },
+  {
+   "run": "console-1310",
+   "note": "video take A (in the demo): served with the payment already in the balance; DeepInfra failed again and Otari fell over to Nebius (2 attempts)",
+   "httpStatus": 200,
+   "payment": "settled",
+   "question": "how much usdc.e and hsk does 0x5270fe01fd3d6148b687da0b5693b0425cfca361 hold, and how many 0.03 usdc.e questions can it still pay for?",
+   "requestId": "0x5270fe01fd3d6148b687da0b5693b0425cfca3610ed5e5ad6011aed6ac00e085",
+   "settlementTx": "https://hsk.blockscout.com/tx/0x5bfd43cd6dd77ce94ed77513802d66e4f15b7b23ffc4282446c007e4d2788912",
+   "refundTx": null,
+   "sellerMessage": null,
+   "answer": "USDC.e balance: 0.176206 USDC.e  \nHSK balance: 1.277589 HSK  \n\nAt 0.03 USDC.e per question, the address can cover 0.176206 \u00f7 0.03 \u2248 5.87 questions, i.e., 5 full 0.03 USDC.e questions.",
+   "verdict": "pass",
+   "otari": {
+    "tier": "dedicated",
+    "screen": {
+     "guard": {
+      "verdict": "safe",
+      "categories": "None"
+     },
+     "route": {
+      "in_scope": true,
+      "needs_web": false,
+      "needs_math": true
+     }
+    },
+    "calls": [
+     {
+      "role": "guard",
+      "policy": "hsk-guard",
+      "servedModel": "Qwen3Guard-Gen-8B",
+      "provider": "ovhcloud",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0,
+      "requestId": "a711f30c-f012-494d-994a-a944eb5415d7",
+      "ms": 1481
+     },
+     {
+      "role": "route",
+      "policy": "hsk-route",
+      "servedModel": "ministral-3b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 5e-06,
+      "requestId": "10c0751f-9c5d-4359-a4ff-47771a6474db",
+      "ms": 1597
+     },
+     {
+      "role": "answer",
+      "policy": "hsk-answer",
+      "servedModel": "openai/gpt-oss-120b",
+      "provider": "nebius",
+      "fallback": true,
+      "attempts": 2,
+      "costUsd": 0.000427,
+      "requestId": "695b470b-bdb2-49de-abdc-ebe8ea03d441",
+      "ms": 5023
+     },
+     {
+      "role": "verify",
+      "policy": "hsk-verify",
+      "servedModel": "ministral-8b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0.00014,
+      "requestId": "762933f1-3108-4c2b-a2f8-7499e0a372e6",
+      "ms": 2187
+     }
+    ],
+    "buyerCostUsd": 0.000567
+   }
+  },
+  {
+   "run": "console-1311",
+   "note": "video take B (in the demo): Agent B, budget used up: Otari budget_exceeded on the answer call -> refunded on-chain",
+   "httpStatus": 429,
+   "payment": "refunded",
+   "question": "how much usdc.e does 0x7a0384f0b947a99da8fea7439950e60b41d44130 hold on hashkey chain right now?",
+   "requestId": "0x7a0384f0b947a99da8fea7439950e60b41d4413066a9d1beeb3e09a8f0bc0281",
+   "settlementTx": "https://hsk.blockscout.com/tx/0x18d0aa9e3f1fbed6dba8d3e93dea7d4a1ef9e43f9e269134ba6b6efa4c174abc",
+   "refundTx": "https://hsk.blockscout.com/tx/0xb3ed625ab63437071cbc2d546c3a0f836fabb21415171dfc00f2ca5a96ad9be8",
+   "sellerMessage": "your AI budget at this seller (your Otari key's spend ceiling) is used up for today (resets 00:00 UTC)"
+  },
+  {
+   "run": "console-take-C",
+   "note": "video take C: Agent B again the same day: 429 ai_budget_exhausted at the quote, nothing signed or charged",
+   "httpStatus": 429,
+   "payment": null
+  },
+  {
+   "run": "console-take-D",
+   "note": "video take D: a harmful question: 422 question_refused by the Qwen3Guard screen at the quote, nothing charged",
+   "httpStatus": 422,
+   "payment": null
   }
  ]
 }

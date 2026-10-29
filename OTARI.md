@@ -16,8 +16,9 @@ gateway (`https://otari.ai/api/v1`, OpenAI-compatible).
 | First commit where Otari came in | [`e99914c`](https://github.com/swiftbotlab/hsk-meter/commit/e99914c6d95676de05f4794fa9a433c7b1d4fecb) Otari gateway client |
 | Code | [`server/otari.py`](server/otari.py) (client, key ring), [`server/ai_ask.py`](server/ai_ask.py) (the endpoint), hooks in [`server/seller.py`](server/seller.py) |
 | Otari configuration | [`otari/config.json`](otari/config.json): keys, budgets, ceilings, routing policies, MCP server, web search |
-| Live proof | [`otari/live_runs.json`](otari/live_runs.json): 8 paid calls on mainnet, with settlement and refund transactions |
-| Tests | [`server/test_ai.py`](server/test_ai.py): 27 offline tests (scripted gateway + loopback HTTP client), in CI |
+| Live proof | [`otari/live_runs.json`](otari/live_runs.json): 10 paid calls on mainnet (3 refunded) and 3 refusals before payment, with transactions |
+| Demo video | [`otari/otari-demo.mp4`](otari/otari-demo.mp4) (4:24, captions and voice-over), script in [`otari/VIDEO_SCRIPT.md`](otari/VIDEO_SCRIPT.md) |
+| Tests | [`server/test_ai.py`](server/test_ai.py): 28 offline tests (scripted gateway + loopback HTTP client), in CI |
 | Feedback | [`OTARI_FEEDBACK.md`](OTARI_FEEDBACK.md) |
 
 ## What happens to one paid question
@@ -84,7 +85,7 @@ A typical paid question costs the seller $0.0002-0.0006 in model calls against a
 
 | Feature | How the app uses it | Where | Live evidence |
 |---|---|---|---|
-| Model routing and fallbacks | Every role is a routing policy with an `on_failure` chain across providers; `hsk-answer` also routes by key (`when: key_id` = pool key -> gpt-oss-20b). The fault drill `hsk-answer-drill` has a broken primary to show the failover | [`otari/config.json`](otari/config.json) `routingPolicies`, `--ai-answer-policy` | run `m4_drill`: `Otari-Fallback: true`, 2 attempts, primary absorbed with a 404 |
+| Model routing and fallbacks | Every role is a routing policy with an `on_failure` chain across providers; `hsk-answer` also routes by key (`when: key_id` = pool key -> gpt-oss-20b). The fault drill `hsk-answer-drill` has a broken primary to show the failover | [`otari/config.json`](otari/config.json) `routingPolicies`, `--ai-answer-policy` | real outages: video takes 1 and A (DeepInfra failed, Nebius served, 2 attempts); fault drill `m4_drill` (primary absorbed with a 404) |
 | Budgets and spending limits | Spend ceilings on every key, a daily workspace ceiling ($0.40) and a monthly organization cap ($1.50) | `otari/config.json` `spendCeilings` | ceilings enforced during these runs; total spend $0.085 |
 | Per-user budgets | Each buyer wallet with a dedicated Otari key gets its own ceiling; `budget_exceeded` on that key becomes an on-chain refund and a same-day quote refusal | `server/otari.py` `KeyRing.for_buyer`, `server/ai_ask.py` `work` | runs `b1`-`b3`: served, then refunded ([refund tx](https://hsk.blockscout.com/tx/0xcac45800160fe190e1aa41fef0196be14a20601721a6b134bda6518265ffbd44)), then refused at the quote |
 | Multiple models serving distinct roles | guard, router, answerer, verifier: four open-weight models from three families | `server/ai_ask.py` | every served run lists all four calls |
@@ -110,6 +111,10 @@ Endpoint 4 was registered in [`0x112bcfb8…`](https://hsk.blockscout.com/tx/0x1
 | m3 | web search question, served but wrong (RPC URL, USDC.e): fixed in `bcf27b0` by grounding the network constants | [settle](https://hsk.blockscout.com/tx/0x110544755b83fa737ff2c3a51d2da66dcf8e300abbd64e85017087ffa515ee29) |
 | m4_drill | fault drill: broken primary, Otari fell over to gpt-oss-120b, Blockscout MCP used | [settle](https://hsk.blockscout.com/tx/0xa43e3a2f1680b68dd6ad57d9f37d9a87d3737d989e8f08adbc8c95b078b797dc) |
 | m5_code | quantitative question, Otari code execution ran | [settle](https://hsk.blockscout.com/tx/0x7c9c9d8e93a6b00e4b081b332e0621e0c880202c59f87a6b74e3a248e0c34913) |
+| video take 1 | served, DeepInfra failed and Otari fell over to Nebius; the answer read the balance one block before the payment (fixed in `28f7c2d`) | [settle](https://hsk.blockscout.com/tx/0x785fbe686cb817d37020d12b49d64c83a200fffbd9f8e94b732f0783b6d32b94) |
+| video take A | served, again DeepInfra -> Nebius (2 attempts), balance already includes the payment | [settle](https://hsk.blockscout.com/tx/0x5bfd43cd6dd77ce94ed77513802d66e4f15b7b23ffc4282446c007e4d2788912) |
+| video take B | Agent B over its budget: Otari `budget_exceeded`, refunded | [settle](https://hsk.blockscout.com/tx/0x18d0aa9e3f1fbed6dba8d3e93dea7d4a1ef9e43f9e269134ba6b6efa4c174abc), [refund](https://hsk.blockscout.com/tx/0xb3ed625ab63437071cbc2d546c3a0f836fabb21415171dfc00f2ca5a96ad9be8) |
+| video takes C, D | over-budget buyer refused at the quote (429); harmful question refused by the guard (422); nothing charged | none |
 
 ## Run it
 
