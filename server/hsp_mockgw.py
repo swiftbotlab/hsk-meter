@@ -9,11 +9,17 @@ Implements what the docs specify, and checks it the way the docs say the gateway
     merchant_authorization checked against the merchant public key registered for the app (cart_hash, aud, exp).
   - GET /merchant/payments and /payments/reusable: exactly one query parameter; PaymentItemResponse records.
   - GET /api/v1/checkout/orders/{flow_id}: no auth (route from the official Go SDK).
-  - POST /api/v1/payment/pay-mandate and GET /api/v1/payment/flow/{id}: paths from the docs' architecture diagram;
-    the body ({flow_id, payment_mandate: AP2PaymentMandate}) is OUR assumption (undocumented). It verifies the
-    EIP-3009 signature against the cart terms, "executes" (a fake tx hash, no chain) and sends signed webhooks
-    ("t=<unix>,v1=<hmac>" over "<t>.<raw body>") for payment-included / -safe / -finalized to the app's webhook_url.
-Knobs: fail_next_payment, duplicate_webhooks (deliver each webhook twice, like a retry), webhook_delay.
+  - Payer side, no auth, in the hosted checkout's wire format as found in public prior art (UNVERIFIED against a
+    live gateway; the docs' diagram names only pay-mandate and flow/:id): GET /api/v1/payment/cart-mandate/flow/{id}
+    ({cartmandate, multi_pay}), POST /api/v1/payment/pay-mandate and /pay-mandate/multi-pay ({flow_id,
+    payment_mandate}), GET /api/v1/payment/flow/{id}[?payment_details_id=]. pay-mandate checks every field the
+    checkout sends: the x402 v2 payment_payload (base64) against the cart's method row and the token's EIP-712
+    domain, the EIP-3009 signature, amount and validity, and user_authorization (HS256 keyed by the payer address,
+    aud, iss = signer, transaction_data = the two hashes for cart_hash_scope). Then it "executes" (a fake tx hash,
+    no chain) and sends signed webhooks ("t=<unix>,v1=<hmac>" over "<t>.<raw body>") for payment-included / -safe /
+    -finalized to the app's webhook_url.
+Knobs: fail_next_payment, duplicate_webhooks (deliver each webhook twice, like a retry), webhook_delay,
+cart_hash_scope ("contents" or "cart_mandate": which cart hash transaction_data[0] must carry).
 """
 import http.server
 import json
@@ -54,6 +60,8 @@ class MockGateway:
         self.duplicate_webhooks = False
         self.webhook_delay = 0.05
         self.webhook_log = []       # (status, http status of the merchant's answer)
+        self.cart_hash_scope = "contents"
+        self.submissions = []       # raw pay-mandate bodies as received (tests inspect the wire)
         self.base = None
 
     def register_app(self, app_key, secret, merchant_pub, webhook_url=None):
@@ -148,53 +156,110 @@ class MockGateway:
             return {"payment_request_id": o["payment_request_id"], "cartmandate": o["cart_mandate"],
                     "status": o["status"], "amount": format(amt, "f")}
 
-    def pay_mandate(self, body):
-        import hsp_payer as PAYER
-        if not isinstance(body, dict) or not isinstance(body.get("payment_mandate"), dict):
-            raise Fail(400, 10001, "payment_mandate required")
-        flow = body.get("flow_id")
+    def cart_mandate_flow(self, flow_id):
+        """GET /api/v1/payment/cart-mandate/flow/{id}: the order as the hosted checkout reads it."""
         with self.lock:
-            cid = self.flows.get(flow)
+            cid = self.flows.get(flow_id)
             if not cid:
                 raise Fail(404, 10003, "Not found")
             o = self.orders[cid]
+            return {"cartmandate": o["cart_mandate"], "multi_pay": o["reusable"]}
+
+    PM_KEYS = {"payment_mandate_id", "payment_details_id", "payment_details_total", "payment_response", "merchant_agent",
+               "timestamp"}
+    PR_KEYS = {"request_id", "method_name", "details", "shipping_address", "shipping_option", "payer_name",
+               "payer_email", "payer_phone"}
+
+    def pay_mandate(self, body, multi=False):
+        import hsp_payer as PAYER
+        self.submissions.append(body)
+        if not isinstance(body, dict) or set(body) != {"flow_id", "payment_mandate"} or \
+                not isinstance(body["payment_mandate"], dict) or \
+                set(body["payment_mandate"]) != {"payment_mandate_contents", "user_authorization"}:
+            raise Fail(400, 10001, "body must be {flow_id, payment_mandate: {payment_mandate_contents, user_authorization}}")
+        flow = body.get("flow_id")
+        with self.lock:
+            cid = self.flows.get(flow) if isinstance(flow, str) else None
+            if not cid:
+                raise Fail(404, 10003, "Not found")
+            o = self.orders[cid]
+            if o["reusable"] != multi:
+                raise Fail(400, 10001, "reusable orders use pay-mandate/multi-pay, one-time orders pay-mandate")
             if not o["reusable"] and o["status"] != "payment-required":
                 raise Fail(400, 40001, "Invalid mandate state")
-        pm = body["payment_mandate"].get("payment_mandate_contents") or {}
+        pm = body["payment_mandate"]["payment_mandate_contents"]
         contents = o["cart_mandate"]["contents"]
         if G.rfc3339_ts(contents["cart_expiry"]) < time.time():
             raise Fail(400, 40001, "Invalid mandate state")
-        if pm.get("payment_mandate_id") != o["payment_request_id"] or \
-                (pm.get("payment_response") or {}).get("request_id") != o["payment_request_id"]:
+        if not isinstance(pm, dict) or set(pm) != self.PM_KEYS:
+            raise Fail(400, 10001, "payment_mandate_contents fields")
+        pr = pm["payment_response"]
+        if not isinstance(pr, dict) or set(pr) != self.PR_KEYS or \
+                any(pr[k] is not None for k in self.PR_KEYS - {"request_id", "method_name", "details"}):
+            raise Fail(400, 10001, "payment_response fields")
+        if pm["payment_mandate_id"] != o["payment_request_id"] or pr["request_id"] != o["payment_request_id"]:
             raise Fail(400, 10001, "payment mandate is for another payment request")
-        det = (pm.get("payment_response") or {}).get("details") or {}
-        idx = det.get("method_data_index")
-        md = contents["payment_request"]["method_data"]
-        if not isinstance(idx, int) or not 0 <= idx < len(md):
-            raise Fail(400, 10001, "bad method index")
-        m = md[idx]["data"]
-        row = G.token_by_contract(m["chain_id"], m["contract_address"])
-        a = (det.get("payload") or {}).get("authorization") or {}
+        if pm["merchant_agent"] != G.CHECKOUT_MERCHANT_AGENT:
+            raise Fail(400, 10001, "merchant_agent")
+        if not isinstance(pm["payment_details_id"], str) or not re.fullmatch(r"[0-9]{20}", pm["payment_details_id"]):
+            raise Fail(400, 10001, "payment_details_id")
+        if not isinstance(pm["timestamp"], str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", pm["timestamp"]):
+            raise Fail(400, 10001, "timestamp")
+        tot = contents["payment_request"]["details"]["total"]
+        t = pm["payment_details_total"]
+        if not isinstance(t, dict) or set(t) != {"label", "amount", "pending"} or t["label"] != tot["label"] or \
+                t["amount"] != {"value": tot["amount"]["value"], "currency": "USD"} or not isinstance(t["pending"], bool):
+            raise Fail(400, 10001, "payment_details_total must repeat the cart total")
+        det = pr["details"]
+        if not isinstance(det, dict) or set(det) != {"payment_payload"}:
+            raise Fail(400, 10001, "details must be {payment_payload}")
         try:
-            signer = PAYER.recover_transfer_signer(det, row)
+            x = G.decode_payment_payload(det["payment_payload"])
+        except G.HspError as e:
+            raise Fail(400, 10001, f"payment_payload: {e}")
+        acc, pl = x.get("accepted"), x.get("payload")
+        if x.get("x402Version") != 2 or not isinstance(acc, dict) or not isinstance(pl, dict) or \
+                not isinstance(pl.get("authorization"), dict) or acc.get("scheme") != "exact":
+            raise Fail(400, 10001, "payment_payload is not an x402 v2 exact payment")
+        md = contents["payment_request"]["method_data"]
+        net = re.fullmatch(r"eip155:([0-9]{1,12})", str(acc.get("network", "")))
+        idx = next((i for i, m in enumerate(md) if net and m["data"]["chain_id"] == int(net.group(1)) and
+                    m["data"]["contract_address"].lower() == str(acc.get("asset", "")).lower()), None)
+        if idx is None:
+            raise Fail(400, 10001, "no method_data row for this network and asset")
+        m = md[idx]["data"]
+        if pr["method_name"] != md[idx]["supported_methods"]:
+            raise Fail(400, 10001, "method_name")
+        row = G.token_by_contract(m["chain_id"], m["contract_address"])
+        extra = acc.get("extra") or {}
+        if row is None or row["eip712"] is None or extra.get("protocol") != "eip3009" or \
+                (extra.get("name"), extra.get("version")) != row["eip712"]:
+            raise Fail(400, 10001, "accepted.extra must name eip3009 and the token's EIP-712 domain")
+        a = pl["authorization"]
+        try:
+            signer = PAYER.recover_transfer_signer(x, row)
         except Exception:
-            raise Fail(400, 10001, "bad authorization signature")
+            raise Fail(400, 30001, "bad authorization signature")
         need = G.units_from_usd(format(o["eff"][idx], "f"), row["decimals"])
         now = time.time()
         if signer.lower() != str(a.get("from", "")).lower():
-            raise Fail(400, 10001, "authorization not signed by from")
-        if str(a.get("to", "")).lower() != m["pay_to"].lower():
+            raise Fail(400, 30001, "authorization not signed by from")
+        if str(a.get("to", "")).lower() != m["pay_to"].lower() or str(acc.get("payTo", "")).lower() != m["pay_to"].lower():
             raise Fail(400, 10001, "authorization pays another address")
-        if int(a.get("value", 0)) < need:
+        if str(acc.get("amount")) != str(a.get("value")) or int(a.get("value", 0)) < need:
             raise Fail(400, 10001, "authorization value below the cart total")
-        if not int(a["validAfter"]) < now < int(a["validBefore"]):
+        if not int(a["validAfter"]) <= now < int(a["validBefore"]):
             raise Fail(400, 10001, "authorization outside its validity window")
-        ua = body["payment_mandate"].get("user_authorization")
-        if ua is not None:
-            u = G.loads_strict(G.b64url_decode(ua), 4096)
-            if u.get("signer", "").lower() != signer.lower() or u.get("cart_hash") != "0x" + G.cart_hash(contents) or \
-                    u.get("payment_mandate_hash") != "0x" + G.sha256_hex(G.canonical_json(pm)):
-                raise Fail(400, 10001, "user_authorization does not bind this cart and mandate")
+        try:
+            u = G.hs256_verify(body["payment_mandate"]["user_authorization"])        # key = the iss address
+        except G.HspError as e:
+            raise Fail(400, 30001, f"user_authorization: {e}")
+        if u.get("aud") != G.CHECKOUT_AUD or str(u.get("iss")).lower() != signer.lower() or \
+                not isinstance(u.get("exp"), int) or u["exp"] < now or not isinstance(u.get("iat"), int) or \
+                u["iat"] > now + 60 or not re.fullmatch(r"0x[0-9a-f]{64}", str(u.get("nonce"))):
+            raise Fail(400, 30001, "user_authorization claims")
+        if u.get("transaction_data") != G.transaction_data(o["cart_mandate"], pm, self.cart_hash_scope):
+            raise Fail(400, 30001, "user_authorization does not bind this cart and mandate")
         with self.lock:
             if a["nonce"] in self.used_auth_nonces:
                 raise Fail(400, 10004, "Conflict")
@@ -214,7 +279,7 @@ class MockGateway:
             self.payments[rec["request_id"]] = rec
             o["status"] = "payment-submitted"
         threading.Thread(target=self._execute, args=(rec["request_id"], tx, failed), daemon=True).start()
-        return {"flow_id": flow, "tx_signature": "" if failed else tx}
+        return {"metadata": {"status": "payment-submitted"}}      # the checkout reads data.metadata.status
 
     def _execute(self, key, tx, failed):
         steps = ["payment-failed"] if failed else ["payment-included", "payment-safe", "payment-finalized"]
@@ -264,12 +329,13 @@ class MockGateway:
                 code = None
             self.webhook_log.append((rec["status"], code))
 
-    def flow(self, flow_id):
+    def flow(self, flow_id, payment_details_id=None):
         with self.lock:
             cid = self.flows.get(flow_id)
             if not cid:
                 raise Fail(404, 10003, "Not found")
-            recs = [p for p in self.payments.values() if p["flow_id"] == flow_id]
+            recs = [p for p in self.payments.values() if p["flow_id"] == flow_id and
+                    payment_details_id in (None, p["request_id"])]
             o = self.orders[cid]
         if not recs:
             return {"payment_id": "", "status": o["status"], "amount": format(min(o["eff"].values()), "f")}
@@ -320,11 +386,18 @@ def make_handler(gw):
             m = re.fullmatch(r"/api/v1/checkout/orders/([A-Za-z0-9-]{4,64})", p)
             if method == "GET" and m:
                 return gw.checkout(m.group(1))
-            if method == "POST" and p == "/api/v1/payment/pay-mandate":
-                return gw.pay_mandate(body_obj)
+            if method == "POST" and p == G.PAYER_ROUTES["pay_mandate"]:
+                return gw.pay_mandate(body_obj, multi=False)
+            if method == "POST" and p == G.PAYER_ROUTES["pay_mandate_multi"]:
+                return gw.pay_mandate(body_obj, multi=True)
+            m = re.fullmatch(r"/api/v1/payment/cart-mandate/flow/([A-Za-z0-9-]{4,64})", p)
+            if method == "GET" and m:
+                return gw.cart_mandate_flow(m.group(1))
             m = re.fullmatch(r"/api/v1/payment/flow/([A-Za-z0-9-]{4,64})", p)
             if method == "GET" and m:
-                return gw.flow(m.group(1))
+                if set(params) - {"payment_details_id"}:
+                    raise Fail(400, 10001, "Invalid parameters")
+                return gw.flow(m.group(1), params.get("payment_details_id"))
             raise Fail(404, 10003, "Not found")
 
         def _do(self, method):
@@ -389,9 +462,22 @@ def demo():
                     poll_s=10, poll_every=0.05)
     time.sleep(0.2)
     rec = next(iter(gw.payments.values()))
-    print("2. payment agent verified the cart (pinned merchant key, cart_hash, rules, AP2 constraints) and signed:")
-    print(json.dumps({"constraints": out["constraints"], "eip3009": {"from": rec["payer_address"], "to": rec["to_pay_address"],
-                      "token": rec["token_address"], "chain": rec["chain"], "amount": rec["pay_amount"]}}, indent=1))
+    print("2. payment agent verified the cart (pinned merchant key, cart_hash, rules, AP2 constraints), signed the "
+          "Payment Mandate and submitted it (POST /api/v1/payment/pay-mandate):")
+    pmw = gw.submissions[-1]["payment_mandate"]
+    pmc = pmw["payment_mandate_contents"]
+    x = G.decode_payment_payload(pmc["payment_response"]["details"]["payment_payload"])
+    ua = json.loads(G.b64url_decode(pmw["user_authorization"].split(".")[1]))
+    print(json.dumps({"constraints": out["constraints"],
+                      "payment_mandate_contents": {k: pmc[k] for k in ("payment_mandate_id", "payment_details_id",
+                                                                       "payment_details_total", "merchant_agent")},
+                      "payment_payload (base64 x402 v2, decoded)": {
+                          "accepted": x["accepted"], "authorization": {k: x["payload"]["authorization"][k]
+                                                                       for k in ("from", "to", "value", "validBefore")}},
+                      "user_authorization (HS256, claims)": {"aud": ua["aud"], "iss": ua["iss"],
+                                                              "transaction_data": [h[:16] + "..." for h in ua["transaction_data"]]},
+                      "gateway record": {"payer": rec["payer_address"], "to": rec["to_pay_address"],
+                                         "chain": rec["chain"], "amount": rec["pay_amount"]}}, indent=1))
     print("3. gateway executed it and signed webhooks to the receiving agent:", [s for s, _ in gw.webhook_log],
           "acks", [c for _, c in gw.webhook_log])
     print("4. GET with X-HSP-Flow ->", out["status"], json.dumps({k: out["body"].get(k) for k in ("data", "payment")}, indent=1))

@@ -9,7 +9,8 @@ instead of our own settlement contract:
      network, from the documented token table), signed with our ES256K merchant key and registered at the gateway
      (POST /api/v1/merchant/orders, HMAC-signed). The answer carries the signed cart, payment_url, flow_id and our
      public key. An unpaid open order for the same payer + resource is re-offered instead of creating another.
-  2. The payer's agent pays through the gateway (agent/hsp_payer.py).
+  2. The payer's agent (the payment agent, agent/hsp_payer.py) verifies the Cart Mandate, signs a Payment Mandate
+     and submits it to the gateway, which executes the transfer on-chain.
   3. GET again with X-Payer + X-HSP-Flow -> served only when the payment for THIS order is confirmed: by a verified
      webhook (POST /hsp/webhook, HMAC "t=,v1=", idempotent journal) or by the HMAC-signed merchant query
      (GET /api/v1/merchant/payments?flow_id=...), with the business fields checked (cart id, token, payee, chain,
@@ -179,7 +180,7 @@ class MerchantAgent:
                              "payTo": m["pay_to"], "amountUsd": o["usd"]} for m in o["methods"]],
                 "extensions": {"hsp-gateway": {
                     "version": "hsp-gateway/1", "gateway": self.cfg.base_url, "payment_url": o["payment_url"],
-                    "flow_id": o["flow_id"], "payment_request_id": o["payment_request_id"],
+                    "flow_id": o["flow_id"], "payment_request_id": o["payment_request_id"], "multi_pay": False,
                     "cart_mandate": o["cart_mandate"], "merchant_public_key": self.gw.key.public_pem(),
                     "resource": o["resource"], "retry_header": "X-HSP-Flow", "proof_header": "X-HSP-Proof",
                     "proof_message": "HSK Meter HSP delivery\nflow: <flow_id>\nresource: <resource> (EIP-191, by X-Payer)",

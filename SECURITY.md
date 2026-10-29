@@ -197,9 +197,17 @@ off the network targets become reachable.
   exact resource requested. The token must be in the documented table with an on-chain-verified EIP-712 domain
   (EIP-3009 only: Permit2's spender is undocumented). Network, payee, per-payment maximum, budget and payment count
   are AP2-style constraints. The amount is reserved in a 0600 ledger before signing, and one flow gets one signature
-  (a retry re-uses it). The authorization is valid for 5 minutes at most and never past the cart's expiry. Against a
-  real gateway the undocumented submission route is never guessed: it needs an explicit `--submit-path`. The ledger
-  keeps the signed mandate, which can move exactly that amount to that payee, so it is kept owner-only.
+  (a retry re-uses it). The authorization is valid for 5 minutes at most and never past the cart's expiry. When the
+  gateway's own copy of the order can be read, its cart, `merchant_authorization` and `multi_pay` must match the
+  offer. Submission goes only to the pinned gateway's `/api/v1/payment/` routes (the wire format the hosted checkout
+  uses; see HSP_STATUS.md); `--sign-only` submits nothing. A resubmission after a lost answer sends the same mandate
+  (same EIP-3009 nonce), so it can never pay twice. The ledger keeps the signed mandate, which can move exactly that
+  amount to that payee, so it is kept owner-only.
+- `user_authorization` is an HS256 JWT whose key is the payer's own address (that is how the checkout builds it). The
+  address is public, so this JWT binds the cart and mandate hashes but authenticates nobody: anyone can make one. The
+  authority to move funds is the wallet's EIP-3009 signature inside `payment_payload`, which fixes payee, amount,
+  token, chain and validity. The payment agent never treats an HS256 JWT it receives as proof of anything.
+- The mock gateway (`server/hsp_mockgw.py`) is for tests only: loopback, in memory, no chain, no funds.
 
 ## Known limitations
 

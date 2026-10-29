@@ -380,8 +380,8 @@ class Records(unittest.TestCase):
         self.assertFalse(G.onchain_transfer_ok(133, "0x" + "cd" * 32, tok, frm, PAYEE, 1, call=lambda *a: {**rc, "status": "0x0"})[0])
 
 
-class Stack(unittest.TestCase):
-    """Mock gateway + receiving agent + payment agent, all over HTTP on loopback."""
+class StackBase(unittest.TestCase):
+    """Mock gateway + receiving agent + payment agent, all over HTTP on loopback (fixture only, no tests)."""
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -423,6 +423,12 @@ class Stack(unittest.TestCase):
                                                                        PAYER.canonical_resource(url))}
         return PAYER.http_get(url, headers)
 
+    def offer(self):
+        st, body = self.get(self.url, {"X-Payer": self.payer.address})
+        return body["extensions"]["hsp-gateway"], "GET /v1/hsk/address-profile?address=" + self.addr
+
+
+class Stack(StackBase):
     # ---- merchant API against the mock
     def test_orders_one_time_and_reusable(self):
         r = self.client.create_order(self.contents("a"))
@@ -560,19 +566,15 @@ class Stack(unittest.TestCase):
         self.assertEqual((st, b["payment"]["confirmed_by"]), (200, "webhook+chain"))
 
     # ---- the payer refuses before signing
-    def offer(self):
-        st, body = self.get(self.url, {"X-Payer": self.payer.address})
-        return body["extensions"]["hsp-gateway"], "GET /v1/hsk/address-profile?address=" + self.addr
-
     def test_payer_signs_only_verified_terms(self):
         offer, res = self.offer()
         d = PAYER.evaluate(offer, self.policy, expected_resource=res,
                            checkout=G.checkout_order(self.gw.base, offer["flow_id"]))
         self.assertEqual((d["units"], d["token"]["chain_id"]), (30000, 133))
-        m = PAYER.sign_payment_mandate(d, self.payer)
-        det = m["payment_mandate_contents"]["payment_response"]["details"]
-        self.assertEqual(PAYER.recover_transfer_signer(det, d["token"]), self.payer.address)
-        self.assertEqual(det["payload"]["authorization"]["to"], PAYEE)
+        m = PAYER.sign_payment_mandate(d, self.payer, resource_url=self.url)
+        x = PAYER.payment_payload(m)
+        self.assertEqual(PAYER.recover_transfer_signer(x, d["token"]), self.payer.address)
+        self.assertEqual(x["payload"]["authorization"]["to"], PAYEE)
         self.assertEqual(m["payment_mandate_contents"]["payment_mandate_id"], offer["payment_request_id"])
 
         def refused(o=None, policy=None, resource=res, checkout=None, match=""):
@@ -603,6 +605,14 @@ class Stack(unittest.TestCase):
                 match="gateway amount")                                             # gateway asks more than the cart
         refused(checkout={"payment_request_id": "pr-other"}, match="another payment request")
         refused(checkout={"payment_request_id": offer["payment_request_id"], "status": "payment-finalized"}, match="not awaiting")
+        gco = G.checkout_order(self.gw.base, offer["flow_id"])                     # the checkout's own route
+        self.assertEqual((gco["cartmandate"], gco["multi_pay"]), (offer["cart_mandate"], False))
+        bad = deep(gco)
+        bad["cartmandate"]["merchant_authorization"] = G.merchant_authorization(offer["cart_mandate"]["contents"],
+                                                                                "Swift Bot Labs", self.key)
+        refused(checkout=bad, match="merchant_authorization differs")             # the gateway holds another JWT
+        refused(checkout={**gco, "multi_pay": True}, match="multi_pay")
+        PAYER.evaluate(offer, self.policy, expected_resource=res, checkout=gco)    # positive control
 
     def test_payer_refuses_mainnet_and_budget(self):
         offer, res = self.offer()
@@ -653,11 +663,212 @@ class Stack(unittest.TestCase):
         self.assertEqual(codes[:30], [402] * 30)
         self.assertEqual(codes[30], 429)
 
-    def test_real_gateway_submission_stays_off(self):
+    def test_submit_paths(self):
         qa = "https://merchant-qa.hashkeymerchant.com"
-        self.assertIsNone(PAYER.choose_submit_path(qa))                            # undocumented: never guessed live
-        self.assertEqual(PAYER.choose_submit_path(qa, "/api/v1/payment/pay-mandate"), "/api/v1/payment/pay-mandate")
-        self.assertEqual(PAYER.choose_submit_path(self.gw.base), PAYER.ASSUMED_SUBMIT_PATH)
+        self.assertEqual(PAYER.choose_submit_path(qa), "/api/v1/payment/pay-mandate")          # the checkout's route
+        self.assertEqual(PAYER.choose_submit_path(qa, multi_pay=True), "/api/v1/payment/pay-mandate/multi-pay")
+        self.assertIsNone(PAYER.choose_submit_path(qa, sign_only=True))
+        self.assertEqual(PAYER.choose_submit_path(qa, "/api/v1/payment/x"), "/api/v1/payment/x")
+        for bad in ("/api/v1/merchant/orders", "/api/v1/payment/../merchant/orders", "/api/v1/payment/x?y=1", "https://e.x/"):
+            with self.assertRaises(PAYER.Refused, msg=bad):
+                PAYER.choose_submit_path(qa, bad)
+
+
+def _plain_canonical(v):
+    """An independent canonical JSON (json.dumps sort_keys) to cross-check G.canonical_json on these objects."""
+    return json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+JS_CHECK = r"""
+const crypto = require('crypto');
+const v = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+function sortKeys(x) { if (x === null || typeof x !== 'object') return x; if (Array.isArray(x)) return x.map(sortKeys);
+  const o = {}; for (const k of Object.keys(x).sort()) o[k] = sortKeys(x[k]); return o; }
+const sha = s => crypto.createHash('sha256').update(s).digest('hex');
+const canon = o => JSON.stringify(sortKeys(o));
+const pm = v.mandate.payment_mandate_contents, [h, p, s] = v.mandate.user_authorization.split('.');
+const claims = JSON.parse(Buffer.from(p, 'base64url').toString());
+const b64 = pm.payment_response.details.payment_payload;
+const x = JSON.parse(Buffer.from(b64, 'base64').toString());
+console.log(JSON.stringify({
+  header: Buffer.from(h, 'base64url').toString(),
+  sig_ok: crypto.createHmac('sha256', new TextEncoder().encode(claims.iss)).update(h + '.' + p).digest('base64url') === s,
+  td0_contents: claims.transaction_data[0] === sha(canon(v.cart_mandate.contents)),
+  td0_is_merchant_cart_hash: claims.transaction_data[0] === v.merchant_cart_hash,
+  td1: claims.transaction_data[1] === sha(canon(pm)),
+  btoa_roundtrip: btoa(JSON.stringify(x)) === b64,
+  payload_keys: Object.keys(x), accepted_keys: Object.keys(x.accepted), claim_keys: Object.keys(claims),
+  timestamp_iso: new Date(pm.timestamp).toISOString() === pm.timestamp,
+  exp_is_cart_expiry: claims.exp === Math.floor(new Date(v.cart_mandate.contents.cart_expiry).getTime() / 1000),
+  body: JSON.stringify({flow_id: v.flow_id, payment_mandate: v.mandate}) === v.wire_body}));
+"""
+
+
+class PayerWire(StackBase):
+    """The Payment Mandate wire format the hosted checkout uses (public prior art; unverified against a live gateway),
+    recomputed independently: stdlib hmac/hashlib/json, openssl, and a Node.js re-implementation of the checkout's
+    sortKeys + JSON.stringify + btoa + HS256 (all skipped when the tool is missing)."""
+
+    def signed(self, scope="contents"):
+        offer, res = self.offer()
+        d = PAYER.evaluate(offer, self.policy, expected_resource=res, checkout=G.checkout_order(self.gw.base, offer["flow_id"]))
+        return offer, d, PAYER.sign_payment_mandate(d, self.payer, resource_url=self.url, cart_hash_scope=scope)
+
+    def post(self, flow_id, mandate, path="/api/v1/payment/pay-mandate"):
+        return G.http_json("POST", self.gw.base + path, body=G.compact_json({"flow_id": flow_id, "payment_mandate": mandate}).encode())
+
+    def test_shape_and_hashes(self):
+        offer, d, m = self.signed()
+        self.assertEqual(list(m), ["payment_mandate_contents", "user_authorization"])
+        pm = m["payment_mandate_contents"]
+        self.assertEqual(list(pm), ["payment_mandate_id", "payment_details_id", "payment_details_total", "payment_response",
+                                    "merchant_agent", "timestamp"])
+        self.assertEqual(pm["merchant_agent"], "HashkeyMerchant")
+        self.assertRegex(pm["payment_details_id"], r"^[0-9]{20}$")
+        self.assertRegex(pm["timestamp"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
+        self.assertEqual(pm["payment_details_total"], {"label": "Total", "amount": {"value": "0.03", "currency": "USD"},
+                                                       "pending": False})
+        pr = pm["payment_response"]
+        self.assertEqual(list(pr), ["request_id", "method_name", "details", "shipping_address", "shipping_option",
+                                    "payer_name", "payer_email", "payer_phone"])
+        self.assertEqual((pr["request_id"], pr["method_name"]), (offer["payment_request_id"], "https://www.x402.org/"))
+        self.assertEqual(list(pr["details"]), ["payment_payload"])
+        raw = base64.b64decode(pr["details"]["payment_payload"], validate=True)       # standard base64 (btoa)
+        x = json.loads(raw)
+        self.assertEqual(raw.decode(), json.dumps(x, separators=(",", ":")))         # compact, insertion order
+        self.assertEqual(list(x), ["x402Version", "payload", "accepted", "resource"])
+        self.assertEqual(x["accepted"], {"scheme": "exact", "network": "eip155:133",
+                                         "asset": "0x8FE3cB719Ee4410E236Cd6b72ab1fCDC06eF53c6", "amount": "30000",
+                                         "payTo": PAYEE, "maxTimeoutSeconds": 3600,
+                                         "extra": {"protocol": "eip3009", "name": "USD Coin", "version": "2"}})
+        a = x["payload"]["authorization"]
+        self.assertEqual((a["from"], a["to"], a["value"]), (self.payer.address, PAYEE, "30000"))
+        self.assertEqual(int(a["validBefore"]) - int(a["validAfter"]), 300)
+        self.assertRegex(a["nonce"], r"^0x[0-9a-f]{64}$")
+        self.assertEqual(x["resource"]["url"], self.url)
+        # user_authorization, verified with plain hmac: key = the payer address as UTF-8
+        h, p, s = m["user_authorization"].split(".")
+        self.assertEqual(G.b64url_decode(h), b'{"alg":"HS256"}')
+        want = __import__("hmac").new(self.payer.address.encode(), (h + "." + p).encode(), "sha256").digest()
+        self.assertEqual(G.b64url_decode(s), want)
+        claims = json.loads(G.b64url_decode(p))
+        self.assertEqual(list(claims), ["aud", "nonce", "iat", "exp", "iss", "transaction_data"])
+        self.assertEqual((claims["aud"], claims["iss"], claims["exp"]), ("HashkeyMerchant", self.payer.address, d["expiry"]))
+        sha = lambda v: __import__("hashlib").sha256(_plain_canonical(v).encode()).hexdigest()   # noqa: E731
+        cart = offer["cart_mandate"]
+        self.assertEqual(claims["transaction_data"], [sha(cart["contents"]), sha(pm)])
+        merchant_claims = json.loads(G.b64url_decode(cart["merchant_authorization"].split(".")[1]))
+        self.assertEqual(claims["transaction_data"][0], merchant_claims["cart_hash"])  # contents hash = the JWT's cart_hash
+        _, _, m2 = self.signed(scope="cart_mandate")
+        c2 = json.loads(G.b64url_decode(m2["user_authorization"].split(".")[1]))
+        self.assertEqual(c2["transaction_data"][0], sha({"contents": cart["contents"],
+                                                         "merchant_authorization": cart["merchant_authorization"]}))
+        with self.assertRaises(G.HspError):                                            # someone else's key
+            G.hs256_verify(m["user_authorization"], b"0x" + b"11" * 20)
+        self.assertEqual(G.hs256_verify(m["user_authorization"])["iss"], self.payer.address)
+
+    @unittest.skipUnless(OPENSSL, "openssl not installed")
+    def test_hs256_matches_openssl(self):
+        _, _, m = self.signed()
+        h, p, s = m["user_authorization"].split(".")
+        for key, same in ((self.payer.address, True), (self.payer.address.lower(), False)):  # positive + negative control
+            mac = subprocess.run(["openssl", "dgst", "-sha256", "-hmac", key, "-binary"], input=(h + "." + p).encode(),
+                                 capture_output=True, check=True).stdout
+            self.assertEqual(G.b64url(mac) == s, same)
+
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_matches_a_javascript_reimplementation(self):
+        offer, d, m = self.signed()
+        vec = {"mandate": m, "cart_mandate": offer["cart_mandate"], "flow_id": offer["flow_id"],
+               "merchant_cart_hash": d["cart_hash"],
+               "wire_body": G.compact_json({"flow_id": offer["flow_id"], "payment_mandate": m})}
+        r = subprocess.run(["node", "-e", JS_CHECK], input=json.dumps(vec).encode(), capture_output=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr.decode()[-400:])
+        got = json.loads(r.stdout)
+        self.assertEqual(got.pop("header"), '{"alg":"HS256"}')
+        self.assertEqual(got.pop("payload_keys"), ["x402Version", "payload", "accepted", "resource"])
+        self.assertEqual(got.pop("accepted_keys"), ["scheme", "network", "asset", "amount", "payTo", "maxTimeoutSeconds", "extra"])
+        self.assertEqual(got.pop("claim_keys"), ["aud", "nonce", "iat", "exp", "iss", "transaction_data"])
+        self.assertEqual(got, {k: True for k in got}, got)
+        self.assertEqual(len(got), 8)
+
+    def test_gateway_refuses_tampered_wire(self):
+        offer, d, m = self.signed()
+        flow, other = offer["flow_id"], Account.create()
+
+        def resign(mm, **claims):                       # re-sign user_authorization after a change
+            c = json.loads(G.b64url_decode(mm["user_authorization"].split(".")[1]))
+            c["transaction_data"] = G.transaction_data(offer["cart_mandate"], mm["payment_mandate_contents"])
+            c.update(claims)
+            mm["user_authorization"] = G.hs256_jwt(c, c["iss"].encode())
+            return mm
+
+        def with_payload(mm, f):
+            x = PAYER.payment_payload(mm)
+            f(x)
+            mm["payment_mandate_contents"]["payment_response"]["details"]["payment_payload"] = G.encode_payment_payload(x)
+            return resign(mm)
+        pmc = lambda mm: mm["payment_mandate_contents"]                                # noqa: E731
+        claims = json.loads(G.b64url_decode(m["user_authorization"].split(".")[1]))
+        cases = {
+            "ua keyed by another address": lambda mm: mm.update(user_authorization=G.hs256_jwt(claims, other.address.encode())),
+            "ua iss is not the signer": lambda mm: resign(mm, iss=other.address),
+            "ua aud": lambda mm: resign(mm, aud="HashKeyMerchant"),
+            "ua expired": lambda mm: resign(mm, exp=int(time.time()) - 5),
+            "ua transaction_data": lambda mm: mm.update(user_authorization=G.hs256_jwt(
+                {**claims, "transaction_data": [claims["transaction_data"][0], "00" * 32]}, self.payer.address.encode())),
+            "ua alg none": lambda mm: mm.update(user_authorization=G.b64url(b'{"alg":"none"}') + "." +
+                                                m["user_authorization"].split(".")[1] + "."),
+            "merchant_agent": lambda mm: resign(pmc(mm).update(merchant_agent="Swift Bot Labs") or mm),
+            "total value": lambda mm: resign(pmc(mm)["payment_details_total"]["amount"].update(value="0.01") or mm),
+            "extra details field": lambda mm: resign(pmc(mm)["payment_response"]["details"].update(method_data_index=0) or mm),
+            "payload not base64": lambda mm: resign(pmc(mm)["payment_response"]["details"].update(payment_payload="!!") or mm),
+            "protocol permit2": lambda mm: with_payload(mm, lambda x: x["accepted"]["extra"].update(protocol="permit2")),
+            "payTo swapped": lambda mm: with_payload(mm, lambda x: x["accepted"].update(payTo="0x" + "ee" * 20)),
+            "amount lowered": lambda mm: with_payload(mm, lambda x: x["accepted"].update(amount="1")),
+            "signed by another wallet": lambda mm: with_payload(mm, lambda x: x["payload"].update(
+                signature=Account.sign_message(__import__("eth_account").messages.encode_defunct(text="x"), other.key)
+                .signature.hex())),
+            "missing user_authorization": lambda mm: mm.pop("user_authorization"),
+        }
+        for name, f in cases.items():
+            mm = deep(m)
+            f(mm)
+            with self.assertRaises(G.HspApiError, msg=name) as e:
+                self.post(flow, mm)
+            self.assertIn(e.exception.code, (10001, 30001), name)
+        self.assertEqual(self.gw.payments, {})
+        with self.assertRaises(G.HspApiError) as e:                                     # one-time order on multi-pay
+            self.post(flow, m, "/api/v1/payment/pay-mandate/multi-pay")
+        self.assertEqual(e.exception.code, 10001)
+        self.assertEqual(self.post(flow, m), {"metadata": {"status": "payment-submitted"}})   # positive control
+        with self.assertRaises(G.HspApiError):                                          # the same mandate twice
+            self.post(flow, m)
+        self.assertEqual(len(self.gw.payments), 1)
+
+    def test_cart_hash_scope_must_match_the_gateway(self):
+        self.gw.cart_hash_scope = "cart_mandate"
+        out = PAYER.pay(self.url, account=self.payer, policy=self.policy, ledger=self.ledger, poll_s=5, poll_every=0.05)
+        self.assertEqual((out["ok"], out["gateway_error"]["code"]), (False, 30001))       # contents hash refused
+        self.assertEqual(self.gw.payments, {})
+        url2 = self.abase + "/v1/hsk/address-profile?address=0x" + "44" * 20
+        out = PAYER.pay(url2, account=self.payer, policy=self.policy, ledger=self.ledger, cart_hash_scope="cart_mandate",
+                        poll_s=10, poll_every=0.05)
+        self.assertTrue(out["ok"], out)                                                 # matching scope pays
+
+    def test_sign_only_then_retry_after_a_lost_answer(self):
+        out = PAYER.pay(self.url, account=self.payer, policy=self.policy, ledger=self.ledger, sign_only=True)
+        self.assertEqual((out["ok"], out["signed"], self.gw.submissions), (False, True, []))
+        st = self.ledger.get(out["flow_id"])
+        self.assertEqual(st["state"], "signed")
+        self.post(out["flow_id"], st["mandate"])          # it reached the gateway, but our side never saw the answer
+        out2 = PAYER.pay(self.url, account=self.payer, policy=self.policy, ledger=self.ledger, poll_s=10, poll_every=0.05)
+        self.assertTrue(out2["ok"], out2)
+        self.assertEqual(out2["resubmit_error"]["code"], 40001)                         # the same mandate, refused
+        self.assertEqual(len(self.gw.payments), 1)                                      # paid exactly once
+        self.assertEqual(len(self.gw.submissions), 2)
+        self.assertEqual(self.ledger.get(out["flow_id"])["state"], "paid")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,9 @@ What is here (stdlib + the repo's pinned eth-* packages, no new dependencies)
     GET /api/v1/checkout/orders/{flow_id} (route taken from the official Go SDK).
   - Webhooks: X-Signature "t=<unix>,v1=<hex>", HMAC over "<t>.<raw body>", 300 s tolerance, constant-time compare,
     and an idempotent 0600 JSONL journal (a retried or replayed delivery changes nothing).
+  - Payer-side wire format (payment_payload, user_authorization, transaction_data, the /api/v1/payment/* routes). The
+    docs do not publish it; it follows the hosted checkout's own client code as found in public prior art and is
+    UNVERIFIED against a live gateway (HSP_STATUS.md, "Payer wire format").
 Switch: HSP mode is OFF unless secrets/hsp/hsp.env holds APP_KEY, APP_SECRET and BASE_URL (load_config()).
 Nothing here prints app_secret, the merchant private key, JWTs or signing strings.
 
@@ -60,6 +63,15 @@ API = "/api/v1"
 ROUTES = {"orders": API + "/merchant/orders", "orders_reusable": API + "/merchant/orders/reusable",
           "payments": API + "/merchant/payments", "payments_reusable": API + "/merchant/payments/reusable",
           "checkout_order": API + "/checkout/orders/{flow_id}"}      # checkout route: official Go SDK, no auth
+# Payer-side routes, no auth: the docs' architecture diagram names pay-mandate and flow/:id; the paths, bodies and the
+# two other routes are taken from the hosted checkout's client code in public prior art (unverified live).
+PAYER_ROUTES = {"pay_mandate": API + "/payment/pay-mandate",                  # one-time orders
+                "pay_mandate_multi": API + "/payment/pay-mandate/multi-pay",  # reusable (multi_pay) orders
+                "flow": API + "/payment/flow/{flow_id}",                      # status, ?payment_details_id=
+                "cart_mandate_flow": API + "/payment/cart-mandate/flow/{flow_id}"}  # the checkout's order read
+CHECKOUT_AUD = "HashkeyMerchant"         # user_authorization aud, as the checkout sends it (same as the docs' JWT aud)
+CHECKOUT_MERCHANT_AGENT = "HashkeyMerchant"   # payment_mandate_contents.merchant_agent, as the checkout sends it
+PAYMENT_PAYLOAD_LIMIT = 8192
 # Base URLs from the API reference. QA = testnet tokens; staging and production = mainnet tokens only.
 HOSTS = {"merchant-qa.hashkeymerchant.com": "testnet", "merchant-stg.hashkeymerchant.com": "mainnet",
          "hsp.hashkey.com": "mainnet"}
@@ -846,10 +858,116 @@ class Gateway:
 
 
 def checkout_order(base_url, flow_id, timeout=15):
-    """Public checkout read (no auth; route from the official Go SDK): payment_request_id, cartmandate, status, amount."""
+    """Public checkout read of an order (no auth). Tries the hosted checkout's own route first
+    (GET /api/v1/payment/cart-mandate/flow/{id}: cartmandate, multi_pay), then the official Go SDK's
+    (GET /api/v1/checkout/orders/{id}: payment_request_id, cartmandate, status, amount)."""
     if not FLOW_RE.match(str(flow_id)):
         raise HspError("bad flow_id")
-    return http_json("GET", base_url + ROUTES["checkout_order"].format(flow_id=urllib.parse.quote(flow_id)), timeout=timeout)
+    q = urllib.parse.quote(flow_id)
+    try:
+        return http_json("GET", base_url + PAYER_ROUTES["cart_mandate_flow"].format(flow_id=q), timeout=timeout)
+    except HspApiError as e:
+        if e.http_status is None:          # unreachable: the second route is on the same host
+            raise
+    return http_json("GET", base_url + ROUTES["checkout_order"].format(flow_id=q), timeout=timeout)
+
+
+# ---------------------------------------------------------------- payer side (checkout wire format, unverified live)
+# What the hosted checkout sends to POST /api/v1/payment/pay-mandate, per its client code in public prior art:
+#   {flow_id, payment_mandate: {payment_mandate_contents, user_authorization}}
+#   payment_mandate_contents.payment_response.details = {payment_payload: base64(JSON of an x402 v2 PaymentPayload)}
+#   user_authorization = HS256 JWT keyed by the UTF-8 bytes of the payer address (iss), aud "HashkeyMerchant",
+#     transaction_data = [sha256(canonical(cart)), sha256(canonical(payment_mandate_contents))]
+# The HS256 key is public (the address), so user_authorization binds the two hashes but proves nothing about who
+# made it: the authority is the wallet's EIP-3009 signature inside payment_payload.
+
+def compact_json(v):
+    """JSON.stringify(v): insertion order, no whitespace, non-ASCII kept (btoa then needs Latin-1; we allow ASCII)."""
+    _check_json(v)
+    return json.dumps(v, separators=(",", ":"), ensure_ascii=False)
+
+
+def encode_payment_payload(obj):
+    """btoa(JSON.stringify(obj)): standard base64 with padding of the compact JSON in insertion order."""
+    s = compact_json(obj)
+    try:
+        raw = s.encode("ascii")
+    except UnicodeEncodeError:
+        raise HspError("payment_payload must be ASCII (the checkout encodes it with btoa)") from None
+    if len(raw) > PAYMENT_PAYLOAD_LIMIT:
+        raise HspError("payment_payload too large")
+    return base64.b64encode(raw).decode("ascii")
+
+
+def decode_payment_payload(s):
+    """Parse an untrusted payment_payload: size cap, strict base64, strict JSON object."""
+    if not isinstance(s, str) or not s or len(s) > PAYMENT_PAYLOAD_LIMIT * 4 // 3 + 4:
+        raise HspError("payment_payload missing or too large")
+    try:
+        raw = base64.b64decode(s, validate=True)
+    except ValueError:
+        raise HspError("payment_payload is not base64") from None
+    obj = loads_strict(raw, PAYMENT_PAYLOAD_LIMIT)
+    if not isinstance(obj, dict):
+        raise HspError("payment_payload must be a JSON object")
+    return obj
+
+
+def hs256_jwt(claims, key_bytes, header=None):
+    """Compact HS256 JWT the way jose's SignJWT writes it: header {"alg":"HS256"}, claims in insertion order."""
+    h = b64url(compact_json(header or {"alg": "HS256"}).encode("utf-8"))
+    p = b64url(compact_json(claims).encode("utf-8"))
+    sig = hmac.new(bytes(key_bytes), (h + "." + p).encode("ascii"), hashlib.sha256).digest()
+    return h + "." + p + "." + b64url(sig)
+
+
+def hs256_verify(token, key_bytes=None):
+    """Verify an HS256 JWT. key_bytes=None: the key is the UTF-8 of the token's own iss claim (the checkout's
+    user_authorization). Returns the claims. Raises HspError."""
+    if not isinstance(token, str) or len(token) > 8192 or token.count(".") != 2:
+        raise HspError("not a compact JWT")
+    h64, p64, s64 = token.split(".")
+    header = loads_strict(b64url_decode(h64), 1024)
+    if not isinstance(header, dict) or header.get("alg") != "HS256" or set(header) - {"alg", "typ"} \
+            or header.get("typ", "JWT") != "JWT":
+        raise HspError("JWT header must be {alg: HS256}")
+    claims = loads_strict(b64url_decode(p64), 8192)
+    if not isinstance(claims, dict):
+        raise HspError("JWT claims must be an object")
+    if key_bytes is None:
+        if not isinstance(claims.get("iss"), str) or not ADDR_RE.match(claims["iss"]):
+            raise HspError("user_authorization iss must be the payer address")
+        key_bytes = claims["iss"].encode("utf-8")
+    want = hmac.new(bytes(key_bytes), (h64 + "." + p64).encode("ascii"), hashlib.sha256).digest()
+    if not hmac.compare_digest(want, b64url_decode(s64)):
+        raise HspError("user_authorization signature does not verify")
+    return claims
+
+
+CART_HASH_SCOPES = ("contents", "cart_mandate")
+
+
+def transaction_data(cart_mandate, payment_mandate_contents, scope="contents"):
+    """[hash of the cart, hash of the payment mandate contents], each hex(SHA-256(canonical JSON)).
+    scope "contents": the cart's contents (what the checkout code hashes; equals the merchant JWT's cart_hash);
+    scope "cart_mandate": {contents, merchant_authorization} (what one prior-art test script hashes)."""
+    if scope not in CART_HASH_SCOPES:
+        raise HspError("cart hash scope must be contents or cart_mandate")
+    cart = cart_mandate["contents"] if scope == "contents" else \
+        {"contents": cart_mandate["contents"], "merchant_authorization": cart_mandate["merchant_authorization"]}
+    return [sha256_hex(canonical_json(cart)), sha256_hex(canonical_json(payment_mandate_contents))]
+
+
+def payment_details_id(now=None):
+    """ID5 the way the checkout makes it: YYYYMMDDHHmmss + 6 random digits (we use UTC)."""
+    now = time.time() if now is None else now
+    return datetime.fromtimestamp(int(now), tz=timezone.utc).strftime("%Y%m%d%H%M%S") + f"{secrets.randbelow(10 ** 6):06d}"
+
+
+def iso_ms(ts):
+    """new Date().toISOString(): 2026-10-29T12:00:00.123Z."""
+    dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
 def payment_record_ok(rec, order, min_status="payment-included", payer=None, min_ratio=Decimal("0.99")):
