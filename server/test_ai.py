@@ -202,6 +202,19 @@ class PaidAnswers(unittest.TestCase):
         self.assertEqual(f["network"]["tokens"]["USDC.e"], P.USDCE)
         self.assertEqual(f["address:" + P.USDCE.lower()]["knownToken"], "USDC.e")
 
+    def test_address_facts_are_read_at_or_after_the_settlement_block(self):
+        e = Env()
+        reads = []
+
+        def lagging_profile(rpc, a):
+            reads.append(a)
+            return {"address": a, "block": e.ch.block - 1 if len(reads) == 1 else e.ch.block, "balances": {}}
+        e.ai.profile = lagging_profile
+        _, _, (st, body, _) = e.buy()
+        self.assertEqual(st, 200, body)
+        self.assertEqual(len(reads), 2)                         # the stale read was retried
+        self.assertGreaterEqual(body["data"]["facts"]["address:" + WHO]["block"], body["payment"]["block"])
+
     def test_buyer_without_own_key_uses_the_pool_key(self):
         e = Env(dedicated=False)
         _, _, (st, body, _) = e.buy()

@@ -766,7 +766,8 @@ class Seller:
                 raise C.RpcError("operator smoke test: simulated upstream failure")
             fn = WORK[path]
             if getattr(fn, "wants_ctx", False):
-                data = fn(self.rpc, arg, {"rid": rid, "payer": payer, "eid": eid, "undeliverable": Undeliverable})
+                data = fn(self.rpc, arg, {"rid": rid, "payer": payer, "eid": eid, "block": rec.get("block"),
+                                          "undeliverable": Undeliverable})
             else:
                 data = fn(self.rpc, arg)
         except NotFound as nf:

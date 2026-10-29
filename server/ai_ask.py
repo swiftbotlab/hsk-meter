@@ -238,8 +238,10 @@ class AiAsk:
         return None
 
     # ---------------------------------------------------------------- after payment (the buyer's key)
-    def facts(self, rpc, q):
-        """What the seller reads itself: up to one transaction and two addresses named in the question."""
+    def facts(self, rpc, q, min_block=None):
+        """What the seller reads itself: up to one transaction and two addresses named in the question. Address
+        reads are retried until the node has the settlement block (a load-balanced RPC can lag one block behind the
+        node that returned the settlement receipt, and the buyer's balance must already show its payment)."""
         out = {"network": self.network} if self.network else {}
         txs = TX_IN.findall(q)[:1]
         rest = TX_IN.sub(" ", q)
@@ -251,6 +253,11 @@ class AiAsk:
                 out["tx:" + h] = {"hash": h, "found": False, "note": "no such transaction on HashKey Chain"}
         for a in addrs:
             prof = self.profile(rpc, a)
+            for _ in range(4):
+                if not min_block or prof.get("block", 0) >= min_block:
+                    break
+                time.sleep(1.0)
+                prof = self.profile(rpc, a)
             if a in self.token_names:
                 prof = {**prof, "knownToken": self.token_names[a]}
             out["address:" + a] = prof
@@ -271,7 +278,7 @@ class AiAsk:
             if hit is not None:                      # a re-serve of this paid request: no new model calls
                 return {**hit, "reserved": True}
             try:
-                return self._work(rpc, q, rid, payer, und)
+                return self._work(rpc, q, rid, payer, und, ctx.get("block"))
             except OT.OtariError as e:
                 if e.kind == "budget":
                     self.mark_exhausted(payer)
@@ -285,13 +292,13 @@ class AiAsk:
                     raise und("ai_guardrail_blocked", "the gateway's guardrail blocked this request", 403)
                 raise und("ai_unavailable", f"the AI gateway could not answer ({e.kind})", 502)
 
-    def _work(self, rpc, q, rid, payer, und):
+    def _work(self, rpc, q, rid, payer, und, min_block=None):
         try:
             sc = self.screen(q)
         except Refused as r:                       # cannot happen for a quoted question; never serve one anyway
             raise und(r.error, r.message.replace("nothing was charged", "refunded"), 422)
         try:
-            facts = self.facts(rpc, q)
+            facts = self.facts(rpc, q, min_block)
         except self.chain_error:
             raise und("chain_unavailable", "HashKey Chain data could not be read", 502)
         key, tier = self.keys.for_buyer(payer)
