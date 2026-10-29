@@ -35,6 +35,8 @@ ARGS=(--unshare-user-try --unshare-pid --unshare-ipc --unshare-uts --unshare-cgr
       --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/sbin /sbin
       --ro-bind /etc /etc
       --dev /dev --proc /proc --tmpfs /tmp --tmpfs /run --tmpfs /home)
+# x86_64 binaries load /lib64/ld-linux-x86-64.so.2: without this link nothing can execute in the sandbox there
+[ -d /usr/lib64 ] && ARGS+=(--symlink usr/lib64 /lib64)
 [ -f "$STUB" ] && ARGS+=(--ro-bind "$STUB" "$STUB")
 ARGS+=(--ro-bind "$PROD/server" "$PROD/server" --ro-bind "$PROD/deploy" "$PROD/deploy"
        --ro-bind "$PROD/ops/state/deployment.json" "$PROD/ops/state/deployment.json"
