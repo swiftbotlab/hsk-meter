@@ -6,10 +6,11 @@
 #
 # Visible inside: /usr and /etc (read-only), the DNS stub resolv.conf, this repo's server/ and deploy/ directories and
 # ops/state/deployment.json (read-only), the Python venv (read-only), the key directory (read-only: provider.env,
-# adapter.env, token.env only), the state directory (read-write), private /tmp and /run. Not visible: the rest of
+# adapter.env, token.env only), the Otari key directory when HSK_METER_OTARI_KEY_DIR is set (read-only), the state
+# directory (read-write), private /tmp and /run. Not visible: the rest of
 # $HOME (other secrets, browser profiles, other projects), /var, D-Bus and other sockets.
 # The network namespace is shared (the seller must reach the RPC and accept local connections); outgoing connections
-# are limited in-process by server/egress.py to the RPC host on port 443.
+# are limited in-process by server/egress.py to the RPC host on port 443 (and the Otari gateway when the AI endpoint is on).
 # Lifetime: this script stays in the foreground as bwrap's parent (a small supervisor) and bwrap gets
 # --die-with-parent, so SIGTERM/SIGINT/SIGHUP to this script stop the sandbox and SIGKILL to it kills the sandbox too
 # (without --die-with-parent, SIGTERM to the outer bwrap left the inner sandbox running). A seller started in the
@@ -45,6 +46,13 @@ ARGS+=(--ro-bind "$PROD/server" "$PROD/server" --ro-bind "$PROD/deploy" "$PROD/d
        --setenv HOME /tmp --setenv TMPDIR /tmp --setenv PATH /usr/bin:/bin --setenv LANG C.UTF-8
        --setenv PYTHONUNBUFFERED 1 --setenv PYTHONDONTWRITEBYTECODE 1
        --setenv HSK_METER_KEY_DIR "$KEYS" --setenv HSK_METER_STATE_DIR "$STATE")
+# Optional: the paid AI endpoint's Otari keys (screen.env, pool.env, buyers/*.env), read-only, only when configured
+if [ -n "${HSK_METER_OTARI_KEY_DIR:-}" ]; then
+  [ -f "$HSK_METER_OTARI_KEY_DIR/screen.env" ] && [ -f "$HSK_METER_OTARI_KEY_DIR/pool.env" ] \
+    || { echo "missing $HSK_METER_OTARI_KEY_DIR/screen.env or pool.env" >&2; exit 2; }
+  ARGS+=(--ro-bind "$HSK_METER_OTARI_KEY_DIR" "$HSK_METER_OTARI_KEY_DIR"
+         --setenv HSK_METER_OTARI_KEY_DIR "$HSK_METER_OTARI_KEY_DIR")
+fi
 WHAT="${1:-}"; shift || true
 case "$WHAT" in
   seller) SCRIPT="$PROD/server/seller.py" ;;

@@ -92,6 +92,15 @@ class NotFound(Exception):
     pass
 
 
+class Undeliverable(Exception):
+    """Raised by a paid WORK function that was paid but cannot deliver (e.g. the AI gateway refused): the payment is
+    refunded on-chain and the buyer gets `error` and `message` with the refund."""
+
+    def __init__(self, error, message, status=502):
+        self.error, self.message, self.status = str(error)[:60], str(message)[:300], int(status)
+        super().__init__(self.message)
+
+
 class KeyFileError(RuntimeError):
     pass
 
@@ -220,6 +229,20 @@ def tx_receipt(rpc, h):
 
 
 WORK = {"/v1/hsk/address-profile": address_profile, "/v1/hsk/tx-receipt": tx_receipt}
+PRECHECK = {}   # path -> fn(arg, payer, log): None to quote, or (status, body, headers) to refuse (nothing charged)
+
+
+def install_ai(ai, endpoint_id):
+    """Add the paid AI endpoint (server/ai_ask.py, answered through the Otari gateway) as endpoint `endpoint_id`."""
+    import ai_ask as AI
+    RESOURCES[AI.AI_PATH] = {"endpointId": int(endpoint_id), "param": "q", "re": AI.Q_RE, "raw_query": True,
+                             "example": "what+is+the+usdc.e+balance+of+0x...", "desc": AI.DESC}
+
+    def work(rpc, q, ctx):
+        return ai.work(rpc, q, ctx)
+    work.wants_ctx = True
+    WORK[AI.AI_PATH] = work
+    PRECHECK[AI.AI_PATH] = lambda q, payer, log: ai.precheck(q, payer)
 
 
 # ------------------------------------------------------------------ the seller
@@ -362,7 +385,9 @@ class Seller:
         if list(q) != [spec["param"]] or len(q[spec["param"]]) != 1 or not spec["re"].match(q[spec["param"]][0]):
             return 400, {"ok": False, "error": "bad_request", "message": f"GET {path}?{spec['param']}=<0x...>"}, {}
         arg = q[spec["param"]][0].lower()
-        resource = f"GET {path}?{spec['param']}={arg}"
+        # raw_query: free text (the AI question) is bound as the raw query string, lowercased, exactly as the buyer
+        # computes it (agent/buyer.py: "GET {path}?{query.lower()}"), so any URL encoding of it agrees on both sides
+        resource = f"GET {path}?{query.lower()}" if spec.get("raw_query") else f"GET {path}?{spec['param']}={arg}"
         eid = spec["endpointId"]
         payer_h = headers.get("X-Payer")
         if payer_h is not None and not P.ADDR_RE.match(payer_h):
@@ -395,6 +420,12 @@ class Seller:
         refused = self.kyc_refusal(payer, log)
         if refused:
             return refused
+        pre = PRECHECK.get(path)
+        if pre:
+            refused = pre(arg, payer, log)
+            if refused:
+                log["refused"] = refused[1].get("error")
+                return refused
         token = self.issue_token(eid, payer, resource)
         _, rid = P.compute_request_id(self.cfg["chain_id"], self.contract, eid, payer, resource, token)
         nonce = P.authorization_nonce(self.contract, eid, rid)
@@ -725,9 +756,16 @@ class Seller:
         try:
             if self.smoke and path == "/v1/hsk/address-profile" and arg == self.smoke:
                 raise C.RpcError("operator smoke test: simulated upstream failure")
-            data = WORK[path](self.rpc, arg)
+            fn = WORK[path]
+            if getattr(fn, "wants_ctx", False):
+                data = fn(self.rpc, arg, {"rid": rid, "payer": payer, "eid": eid, "undeliverable": Undeliverable})
+            else:
+                data = fn(self.rpc, arg)
         except NotFound as nf:
             return self.refund(rid, payer, payment, settle_resp, str(nf), log, status=404)
+        except Undeliverable as u:
+            log["err"] = u.error
+            return self.refund(rid, payer, payment, settle_resp, u.message, log, status=u.status, extra={"reason": u.error})
         except C.RpcError as err:
             log["err"] = str(err)[:120]
             return self.refund(rid, payer, payment, settle_resp, "upstream data unavailable", log, status=502)
@@ -971,7 +1009,7 @@ def make_handler(seller):
                 elif u.path == "/.well-known/x402":
                     status, body, h = 200, {"x402Version": P.X402_VERSION, "network": P.NETWORK, "asset": P.USDCE,
                                             "payTo": seller.contract, "schemes": ["exact", "hsk-paywall-tx"],
-                                            "resources": [{"path": p + "?" + s["param"] + "=0x...", "endpointId": s["endpointId"],
+                                            "resources": [{"path": p + "?" + s["param"] + "=" + s.get("example", "0x..."), "endpointId": s["endpointId"],
                                                            "description": s["desc"]} for p, s in RESOURCES.items()],
                                             "extensions": ["hsp-draft"] + (["usd-estimate"] if seller.feeds else [])
                                                           + (["kyc-sbt"] if seller.kyc else [])}, {}
@@ -1069,6 +1107,15 @@ def main():
     ap.add_argument("--no-egress-guard", action="store_true", help="local development only")
     ap.add_argument("--smoke-refund-address", default=None,
                     help="operator smoke test (loopback only): address-profile requests for this address are refunded")
+    ap.add_argument("--otari-key-dir", default=os.environ.get("HSK_METER_OTARI_KEY_DIR"),
+                    help="enable GET /v1/ai/ask, answered through the Otari gateway: dir with screen.env, pool.env, "
+                         "buyers/0x<addr>.env (one OTARI_API_KEY each, 0600); or $HSK_METER_OTARI_KEY_DIR")
+    ap.add_argument("--ai-endpoint-id", type=int, default=4, help="on-chain endpoint id of /v1/ai/ask")
+    ap.add_argument("--otari-base", default="https://otari.ai/api/v1")
+    ap.add_argument("--ai-answer-policy", default="hsk-answer",
+                    help="Otari routing policy for the answer role (hsk-answer-drill: fault drill, broken primary)")
+    ap.add_argument("--otari-mcp-server-id", action="append", default=[],
+                    help="id of an MCP server configured in the Otari workspace (repeatable)")
     a = ap.parse_args()
     if not a.key_dir:
         sys.exit("--key-dir (or HSK_METER_KEY_DIR) is required")
@@ -1083,10 +1130,25 @@ def main():
         sys.exit("the egress guard cannot be disabled on mainnet")
     if not P.ADDR_RE.match(a.kyc_sbt):
         sys.exit("bad --kyc-sbt address")
+    ai = None
+    if a.otari_key_dir:
+        import ai_ask as AI
+        import otari as OT
+        try:
+            keys = OT.KeyRing(a.otari_key_dir)
+        except OT.KeyFileError as e:
+            sys.exit(str(e))
+        client = OT.Otari(base=a.otari_base)
+        ai = AI.AiAsk(client, keys, profile=address_profile, receipt=tx_receipt, not_found_exc=NotFound,
+                      chain_error=C.RpcError, mcp_server_ids=a.otari_mcp_server_id, answer_policy=a.ai_answer_policy)
+        install_ai(ai, a.ai_endpoint_id)
     if not a.no_egress_guard:
         import egress
         u = urllib.parse.urlparse(a.rpc)
-        egress.install([(u.hostname, u.port or (443 if u.scheme == "https" else 80))])
+        allow = [(u.hostname, u.port or (443 if u.scheme == "https" else 80))]
+        if ai:
+            allow.append((ai.client.host, ai.client.port))
+        egress.install(allow)
     os.makedirs(a.state_dir, mode=0o700, exist_ok=True)
     cfg = {"network": a.network, "rpc": a.rpc, "chain_id": a.chain_id, "contract": contract, "key_dir": a.key_dir,
            "state_dir": a.state_dir, "settle_budget_wei": int(a.settle_budget_hsk * 1e18),
@@ -1124,6 +1186,8 @@ def main():
                       "settler": seller.provider.address, "hspAdapter": seller.adapter.address,
                       "endpoints": seller.info(), "egressGuard": not a.no_egress_guard,
                       "smokeRefund": bool(a.smoke_refund_address),
+                      "ai": {"path": "/v1/ai/ask", "endpointId": a.ai_endpoint_id, "gateway": a.otari_base,
+                             "answerPolicy": a.ai_answer_policy, "keys": repr(ai.keys)} if ai else None,
                       "priceFeeds": seller.feeds.status() if seller.feeds else None, "gasGuardHskUsd": seller.hsk_usd(),
                       "compliance": seller.kyc.describe() if seller.kyc else {"required": False},
                       "journalRecords": len(seller.state.recs)}), flush=True)

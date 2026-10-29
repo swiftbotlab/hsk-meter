@@ -174,9 +174,11 @@ class Otari:
         except urllib.error.HTTPError as e:
             hdr = {k.lower(): v for k, v in (e.headers or {}).items()}
             try:
-                raw = e.read(self.max_body + 1) if e.fp else b""
+                raw = e.read(64_000) if e.fp else b""
             except Exception:
                 raw = b""
+            finally:
+                e.close()
             try:
                 j = json.loads(raw or b"{}")
             except ValueError:
@@ -201,6 +203,10 @@ class Otari:
             cost = float(usage.get("cost_usd") or 0)
         except (TypeError, ValueError):
             cost = 0.0
+        try:                       # the token-only estimate; cost_usd also carries hosted tool fees (sandbox, search)
+            est = float(usage["estimated_cost"]) if usage.get("estimated_cost") is not None else None
+        except (TypeError, ValueError):
+            est = None
         content = msg.get("content") if isinstance(msg, dict) else None
         tool_calls = []
         for t in (j.get("otari_tool_calls") or [])[:10]:
@@ -214,5 +220,6 @@ class Otari:
                 "fallback": hdr.get("otari-fallback") == "true",
                 "attempts": int(hdr["otari-attempt-count"]) if str(hdr.get("otari-attempt-count", "")).isdigit() else None,
                 "requestId": hdr.get("otari-request-id"), "costUsd": cost,
+                "toolFeesUsd": round(max(0.0, cost - est), 6) if est is not None else None,
                 "usage": {k: usage.get(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens")},
                 "toolCalls": tool_calls, "ms": int((time.monotonic() - t0) * 1000)}

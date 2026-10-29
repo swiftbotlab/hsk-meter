@@ -5,7 +5,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, otari-gateway]
   pull_request:
   workflow_dispatch:
 
@@ -54,6 +54,9 @@ jobs:
       - name: HashKey ecosystem (APRO feeds, KYC SBT mode)
         if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
         run: python tools/ci_offline.py server/test_ecosystem.py
+      - name: Paid AI endpoint through Otari (scripted gateway, loopback HTTP client tests)
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
+        run: python tools/ci_offline.py server/test_ai.py
       - name: Buyer
         if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
         run: python tools/ci_offline.py agent/test_buyer.py
