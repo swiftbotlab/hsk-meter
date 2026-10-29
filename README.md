@@ -9,6 +9,35 @@ checked the adapter-signed receipt against the buyer's signed mandate.
 
 By Swift Bot Labs, for the HashKey Chain Horizon Hackathon (India), track **Agent Payments & A2A Settlement**.
 
+## Track 2 fit
+
+The track asks for "the A2A scenario combined with HSP's API interface, where the Payment Agent constructs a Payment
+Mandate based on the payment conditions transmitted by the receiving Agent, completes the wallet signature, and then
+verifies and executes the on-chain payment through the existing Gateway of HSP." Here is where each part of that
+sentence lives in this repository, and how far it has been proven.
+
+| The listing says | HSK Meter component | Proven by |
+|---|---|---|
+| A2A scenario | `agent/agent_b.py` (Agent B) pays `server/seller.py` (Agent A) to make its own answer | live on mainnet: 3 runs and a composed refund, see [A2A](#agent-to-agent-a2a-a-seller-that-is-also-a-buyer) |
+| the receiving Agent transmits the payment conditions | `server/hsp_merchant_agent.py`: turns a priced request into a **Cart Mandate**, signs it (ES256K `merchant_authorization`), registers it at the HSP gateway (`POST /api/v1/merchant/orders`, HMAC) and answers `402` with it | offline tests against our mock gateway |
+| the Payment Agent constructs a Payment Mandate | `agent/hsp_payer.py`: checks the cart against a pinned merchant key, `cart_hash`, the documented cart rules, the resource, payee and AP2 spending limits, then builds the **Payment Mandate** in the wire format the hosted checkout uses | offline tests; field-by-field sources in [HSP_STATUS.md](HSP_STATUS.md#payer-wire-format-unverified-against-a-live-gateway) |
+| completes the wallet signature | EIP-3009 `TransferWithAuthorization` (EIP-712) over the token's domain as read on-chain, inside the mandate's x402 v2 `payment_payload` | offline tests, plus an independent Node.js check of the encoding |
+| verifies and executes through the existing Gateway of HSP | `server/hsp_gateway.py`: HashKey Merchant client (orders, payment queries, signed webhooks) and submission to `POST /api/v1/payment/pay-mandate` | built and tested against the mock; **not yet run against the live HSP gateway**: merchant credentials are requested and not issued |
+| the on-chain payment, on HSK Chain mainnet | [`HskPayPerRequest` `0x78C8…7F8c`](https://hsk.blockscout.com/address/0x78C8476772BC209C3df09Da5e129d0879cd57F8c): per-request settlement in USDC.e with on-chain refunds | live: 47 transactions, 34 paid requests, 6 refunds; [live proof](#live-proof-on-mainnet) and [dashboard](https://swiftbotlab.github.io/hsk-meter/) |
+
+## Self-check: six judging dimensions
+
+| Dimension | What there is to check | Evidence |
+|---|---|---|
+| Track fit | every phrase of the track text maps to a component (table above); HSP is used as documented on the merchant side and as the checkout uses it on the payer side | [HSP gateway](#hsp-gateway-cart-mandate-payment-mandate-gateway), [HSP_STATUS.md](HSP_STATUS.md) |
+| Completeness | verified contract on mainnet, seller, buyer CLI, MCP server, a second agent that buys from the first, live dashboard, demo video, the HSP gateway rail | [live proof](#live-proof-on-mainnet), [dashboard](https://swiftbotlab.github.io/hsk-meter/), [video](https://swiftbotlab.github.io/hsk-meter/hsk-meter-demo.mp4) |
+| Team | Swift Bot Labs; how we work | [Team](#team) |
+| Solution value | an API can charge 0.025-0.08 USDC.e per call, settled on-chain per request, and the payment comes back automatically when delivery fails; the buyer needs no gas token | [How a request is paid](#how-a-request-is-paid) |
+| Authenticity | every number links to a transaction; what is not done is written down (no live HSP gateway run yet) | [live proof](#live-proof-on-mainnet), [what waits on HashKey](HSP_STATUS.md#what-waits-on-hashkey) |
+| Code quality | CI on every push runs 300 tests: 210 Python tests with the network refused by a guard (4 more are online-only), 35 dashboard tests and 55 Foundry tests (unit, fuzz, invariants); guards mutation-checked; security notes per component | [CI](https://github.com/swiftbotlab/hsk-meter/actions/workflows/ci.yml), [SECURITY.md](SECURITY.md), [Run the tests](#run-the-tests) |
+
+## At a glance
+
 **Live dashboard:** [swiftbotlab.github.io/hsk-meter](https://swiftbotlab.github.io/hsk-meter/) reads the contract's
 events straight from the public explorer in your browser: totals, USDC.e per day, refund rate and the latest payments,
 each linked to its transaction.
@@ -380,7 +409,12 @@ Full details and the threat model are in [SECURITY.md](SECURITY.md). In short:
 Track 2's flow, as the organizer describes it: the Payment Agent builds a Payment Mandate from the payment
 conditions the receiving agent sends, completes the wallet signature, and the payment is verified and executed
 on-chain by HSP's existing gateway. HSK Meter implements this against the
-[HashKey Merchant API](https://hashkey-merchant.github.io/en/index.html), using the AP2 terms that API uses.
+[HashKey Merchant API](https://hashkey-merchant.github.io/en/index.html), using the AP2 terms that API uses. The
+merchant side follows the official docs. The docs do not publish the payer side, so the Payment Mandate follows the
+wire format of the gateway's hosted checkout, as found in its client code in public prior art (sources and one open
+conflict in [HSP_STATUS.md](HSP_STATUS.md#payer-wire-format-unverified-against-a-live-gateway)). Everything here runs
+against our mock gateway; **none of it has run against the live HSP gateway yet**, because merchant credentials are
+requested and not issued.
 
 ```mermaid
 sequenceDiagram
@@ -394,8 +428,8 @@ sequenceDiagram
     G-->>R: payment_url, flow_id
     R-->>P: 402 with the signed Cart Mandate, flow_id and the merchant key
     Note over P: verifies the JWT against the pinned key, cart_hash, the cart rules, the resource, token, payee and limits
-    P->>P: wallet signs EIP-3009 TransferWithAuthorization (EIP-712) and builds the AP2 Payment Mandate
-    P->>G: submits the Payment Mandate
+    P->>P: wallet signs EIP-3009 TransferWithAuthorization (EIP-712), builds the Payment Mandate
+    P->>G: POST /api/v1/payment/pay-mandate {flow_id, payment_mandate}
     G->>C: executes the transfer
     G->>R: webhooks payment-included, -safe, -finalized (HMAC-signed)
     P->>R: GET again with X-HSP-Flow and X-HSP-Proof (the paying wallet's signature)
@@ -408,7 +442,7 @@ sequenceDiagram
 |---|---|
 | a priced request (endpoint, exact resource, price) | **Cart Mandate** `contents`: id `hskm-<endpoint>-<random>`, `details.id` = `payment_request_id`, one display item labelled with the exact resource, total = the endpoint price in USD (0.03 or 0.025), one USDC `method_data` row per network: hashkey-testnet (`133`, `0x8FE3cB71...`) and base-sepolia (`84532`, `0x036CbD53...`) |
 | the receiving agent's signature | `merchant_authorization`: ES256K JWT with `cart_hash` = SHA-256 of the canonical contents; public key [`hsp_merchant_public_key.pem`](hsp_merchant_public_key.pem) |
-| the payer's consent | **Payment Mandate**: `payment_mandate_contents` (`payment_mandate_id` = `payment_request_id`, a payer-generated `payment_details_id`, the total, and `payment_response` carrying the EIP-3009 authorization and its signature) plus `user_authorization` |
+| the payer's consent | **Payment Mandate**: `payment_mandate_contents` (`payment_mandate_id` = `payment_request_id`, a payer-generated `payment_details_id`, the cart's total, and `payment_response.details.payment_payload` = base64 of an x402 v2 PaymentPayload carrying the EIP-3009 authorization and its signature) plus `user_authorization` (HS256 JWT, `aud` `HashkeyMerchant`, `transaction_data` = SHA-256 of the canonical cart and of the mandate contents) |
 | the buyer's spend guard | AP2 constraints: `payment.allowed_payees`, `payment.amount_range`, `payment.budget`, `payment.agent_recurrence`, reserved in a ledger before anything is signed |
 | proof of payment before delivery | the gateway's payment record (status at least `payment-included`, tx hash, cart id, token, payee, amount, payer), its signed webhook, and optionally the token `Transfer` on-chain; the data goes only to the wallet that paid (`X-HSP-Proof`, an EIP-191 signature) |
 
@@ -417,10 +451,10 @@ What is live and what waits on HashKey:
 | Part | State |
 |---|---|
 | Merchant API: one-time and reusable orders, payment queries, HMAC request signing, ES256K JWT, webhooks with idempotency | built from the docs and checked against the official SDKs; tested against a local mock gateway that implements the documented shapes, error codes and signature checks; openssl independently verifies our HMAC and ES256K output |
-| Receiving agent and payment agent | run end to end against the mock: `python3 server/hsp_mockgw.py demo` |
+| Receiving agent and payment agent | run end to end against the mock: `python3 server/hsp_mockgw.py demo`; a retry after a lost answer pays once |
 | Credentials | requested from HashKey operations; HSP mode stays off until `secrets/hsp/hsp.env` has `APP_KEY`, `APP_SECRET`, `BASE_URL` |
 | QA gateway | our network currently gets a Cloudflare block page from `merchant-qa.hashkeymerchant.com`; access requested |
-| Payment Mandate submission | the docs publish no payer-side API (the route appears only in their architecture diagram). Our agent builds the SDK's `AP2PaymentMandate` and, against a real gateway, submits it only once the route is confirmed. Open questions: [HSP_STATUS.md](HSP_STATUS.md) |
+| Payment Mandate submission | built in the hosted checkout's wire format (the docs name the route in their architecture diagram only) and submitted to `POST /api/v1/payment/pay-mandate`; the mock gateway checks every field and refuses 15 tampered variants; tests recompute the encoding independently (stdlib, openssl, Node.js). **Unverified against a live gateway.** Open questions: [HSP_STATUS.md](HSP_STATUS.md) |
 
 ## HSP draft adapter on the settlement contract
 
@@ -467,24 +501,41 @@ Implemented today (`server/hsp_draft.py`, labeled `hsp-draft/swiftbotlab-0`):
 | `deploy/` | `run_sandboxed.sh` (bubblewrap sandbox for the seller), `hsk-meter-seller.service` (systemd user unit template) and `sandbox_probe.py` (what the sandbox can reach) |
 | `ops/state/` | the mainnet deployment record and the public addresses of the demo roles |
 | `docs/` | the live dashboard (static page on GitHub Pages; `snapshot.json` is its fallback when the explorer API is down) |
-| `tools/` | `dashboard_snapshot.py` (refreshes the fallback snapshot, incl. a checked USDC/USD reading) and `test_dashboard.js` (decoder, counter and USD tests) |
+| `tools/` | `dashboard_snapshot.py` (refreshes the fallback snapshot, incl. a checked USDC/USD reading), `test_dashboard.js` (decoder, counter and USD tests) and `ci_offline.py` (runs a test suite with every non-loopback connection refused) |
+| `.github/workflows/ci.yml`, `constraints.txt` | CI: every suite below on each push, offline, with pinned dependencies, actions pinned by commit and a checksum-checked solc |
 
 ## Run the tests
 
+All of these except the `--online` and live lines run in [CI](https://github.com/swiftbotlab/hsk-meter/actions/workflows/ci.yml)
+on every push, with the network refused (`python3 tools/ci_offline.py <suite>`; `--selftest` shows the guard working).
+
 ```sh
-pip install -r requirements.txt
+pip install -r requirements.txt -c constraints.txt
 cd contracts && forge test && cd ..   # 55 tests in 3 suites: unit + fuzz, gas, model-based invariants (256 runs x 200 calls)
 python3 server/test_protocol.py       # protocol, typed data, HSP verifier, payload validation (offline)
 python3 server/test_security.py       # 42 security regression tests against an offline chain model
 python3 agent/test_buyer.py           # the buyer's spend guard
 python3 agent/test_mcp.py             # MCP server end to end against the real seller on an offline chain model (56 tests)
 python3 server/test_ecosystem.py      # APRO feeds (quote USD, gas guard, buyer USD view) and KYC SBT mode (29 offline tests)
-python3 server/test_hsp_gateway.py    # HSP gateway rail against the mock gateway: HMAC, ES256K, carts, webhooks, A2A flow (37 tests)
+python3 server/test_hsp_gateway.py    # HSP gateway rail against the mock gateway: HMAC, ES256K, carts, webhooks, A2A flow, payer wire format (43 tests)
 node tools/test_dashboard.js          # dashboard decoder and USD value: only endpoints 1 and 2 of our provider count, hostile logs dropped (35 tests)
 python3 server/test_ecosystem.py --online                                     # adds read-only checks of the real feeds and SBT
 HSK_METER_BUYER_KEY_FILE=buyer.env python3 server/test_protocol.py --online   # adds read-only checks against the live contract
 HSK_METER_BUYER_KEY_FILE=buyer.env python3 server/test_live.py                # hostile-input tests against a running seller (pays nothing)
 ```
+
+## Team
+
+HSK Meter is built and maintained by **Swift Bot Labs**, a small maker team that builds payment and data tools for
+on-chain services ([github.com/swiftbotlab](https://github.com/swiftbotlab)). How we work on this project:
+
+- Ship on mainnet, then prove it: every claim in this README links to a transaction or a test.
+- Write down what is not done. The HSP gateway rail waits on merchant credentials, and we say so instead of
+  demoing a mock as the real thing.
+- Every change runs the full test suite in CI before it counts, and code that handles keys or money gets a security
+  review before it is published.
+
+Questions and reports: open an issue, or a private security advisory for anything sensitive.
 
 ## License
 
