@@ -232,6 +232,14 @@ WORK = {"/v1/hsk/address-profile": address_profile, "/v1/hsk/tx-receipt": tx_rec
 PRECHECK = {}   # path -> fn(arg, payer, log): None to quote, or (status, body, headers) to refuse (nothing charged)
 
 
+def network_facts(contract, rpc_url, chain_id=P.CHAIN_ID):
+    """What the seller knows for certain about the chain it sells data from (grounding for the AI endpoint)."""
+    return {"name": "HashKey Chain", "chainId": chain_id, "nativeToken": "HSK", "rpc": rpc_url,
+            "explorer": "https://hsk.blockscout.com", "docs": "https://docs.hskchain.net",
+            "tokens": {"USDC.e": P.USDCE, "USDT": USDT, "WHSK": WHSK}, "settlementContract": contract.lower(),
+            "x402Network": P.NETWORK}
+
+
 def install_ai(ai, endpoint_id):
     """Add the paid AI endpoint (server/ai_ask.py, answered through the Otari gateway) as endpoint `endpoint_id`."""
     import ai_ask as AI
@@ -1140,7 +1148,8 @@ def main():
             sys.exit(str(e))
         client = OT.Otari(base=a.otari_base)
         ai = AI.AiAsk(client, keys, profile=address_profile, receipt=tx_receipt, not_found_exc=NotFound,
-                      chain_error=C.RpcError, mcp_server_ids=a.otari_mcp_server_id, answer_policy=a.ai_answer_policy)
+                      chain_error=C.RpcError, mcp_server_ids=a.otari_mcp_server_id, answer_policy=a.ai_answer_policy,
+                      network=network_facts(contract, a.rpc, a.chain_id))
         install_ai(ai, a.ai_endpoint_id)
     if not a.no_egress_guard:
         import egress

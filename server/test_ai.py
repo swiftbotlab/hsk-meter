@@ -80,7 +80,7 @@ class Env:
         self.keys = OT.KeyRing(screen="KEY-SCREEN-0123456789", pool="KEY-POOL-0123456789", buyers=buyers)
         self.ai = AI.AiAsk(self.otari, self.keys, profile=S.address_profile, receipt=S.tx_receipt,
                            not_found_exc=S.NotFound, chain_error=S.C.RpcError, mcp_server_ids=["mcp-blockscout"],
-                           answer_policy=answer_policy)
+                           answer_policy=answer_policy, network=S.network_facts(CONTRACT, "https://mainnet.hsk.xyz"))
         S.install_ai(self.ai, AI_EID)
         self.s = S.Seller({"contract": CONTRACT, "state_dir": None, "tx_wait_s": 0.3}, rpc=self.ch,
                           provider=self.provider, adapter=self.adapter, token_key=os.urandom(32))
@@ -193,6 +193,15 @@ class PaidAnswers(unittest.TestCase):
         self.assertEqual(e.refunds_sent(), 0)
         self.assertEqual(e.ch.payments[rid]["refunded"] if rid in e.ch.payments else False, False)
 
+    def test_facts_carry_network_constants_and_label_known_tokens(self):
+        e = Env()
+        q = "q=" + urllib.parse.quote_plus("is " + P.USDCE.lower() + " the usdc.e token on hashkey chain?")
+        _, _, (st, body, _) = e.buy(q)
+        f = body["data"]["facts"]
+        self.assertEqual((f["network"]["chainId"], f["network"]["rpc"]), (177, "https://mainnet.hsk.xyz"))
+        self.assertEqual(f["network"]["tokens"]["USDC.e"], P.USDCE)
+        self.assertEqual(f["address:" + P.USDCE.lower()]["knownToken"], "USDC.e")
+
     def test_buyer_without_own_key_uses_the_pool_key(self):
         e = Env(dedicated=False)
         _, _, (st, body, _) = e.buy()
@@ -208,6 +217,7 @@ class PaidAnswers(unittest.TestCase):
         self.assertEqual(st, 200, body)
         ans = next(c for c in e.otari.calls if c["model"] == "hsk-answer")["body"]
         self.assertEqual([t["type"] for t in ans["tools"]], ["otari_web_search", "otari_code_execution"])
+        self.assertEqual(ans["tools"][0]["max_uses"], 1)                  # each search is billed: one per question
         self.assertEqual(body["data"]["sources"], ["https://docs.hskchain.net/x"])
 
     def test_fallback_and_cost_are_reported_to_the_buyer(self):
