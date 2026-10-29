@@ -123,4 +123,6 @@ found nothing; today the caller cannot tell an empty search from a filtered one.
 
 ## Issues opened on mozilla-ai/otari
 
-Listed in [SUBMISSION.md](SUBMISSION.md).
+- [#2694](https://github.com/mozilla-ai/otari/issues/2694) Gateway-run tool fees are not held against spend ceilings, so one request can pass a key's cap (bug 1)
+- [#2695](https://github.com/mozilla-ai/otari/issues/2695) `budget_used_pct` ignores spend ceilings, so "Tier down on budget" never fires on otari.ai (bug 2)
+- [#2696](https://github.com/mozilla-ai/otari/issues/2696) otari.ai organizations cannot create service keys: `POST /organizations/me/keys` silently drops `is_service_key` (bug 3)
