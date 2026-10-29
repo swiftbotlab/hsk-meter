@@ -13,6 +13,31 @@ By Swift Bot Labs, for the HashKey Chain Horizon Hackathon (India), track **Agen
 mainnet, an automatic refund, one agent paying another, and the HSP rail, with captions. The full 2:54 walkthrough
 is under [At a glance](#at-a-glance).
 
+## Try it now
+
+**Always-on public endpoint: [hsk-meter.swiftbotlab.workers.dev](https://hsk-meter.swiftbotlab.workers.dev)**, on
+HashKey Chain mainnet. It holds no private key: you pay the settlement contract yourself, and the endpoint checks that
+payment on-chain before it answers. Each payment buys one response; a replay is refused.
+
+```sh
+# 1. Ask for a price: a real x402 v2 "402 Payment Required", with a requestId bound to your address and this request
+curl -i "https://hsk-meter.swiftbotlab.workers.dev/v1/hsk/address-profile?address=0x78C8476772BC209C3df09Da5e129d0879cd57F8c" \
+  -H "X-Payer: 0xYourAddress"
+
+# 2. Pay and get the data (approve + pay() from your wallet, then the paid retry; needs 0.03 USDC.e and a little HSK)
+python3 agent/buyer.py "https://hsk-meter.swiftbotlab.workers.dev/v1/hsk/address-profile?address=0x78C8476772BC209C3df09Da5e129d0879cd57F8c" \
+  --scheme tx --key-file buyer.env \
+  --expect-provider 0x30CCc6d816854d1a66fBfecE15b1515a3E941160 --expect-payee 0xA8A49A6Ca872D54a8FD5FB121139De9bff62a48D
+
+# 3. Check any payment, free: ACCEPT or REJECT, with every check (this one is a live paid call to the endpoint)
+curl "https://hsk-meter.swiftbotlab.workers.dev/v1/receipt/0x0c70d8276b168b04888595a5a3e2cf4d0dedcd148ab0946f5bdfdca7f388a282"
+```
+
+Step 2 works with any wallet too: `cast send` the `approve` and `pay(endpointId, requestId, amount)` calls shown on the
+[endpoint's home page](https://hsk-meter.swiftbotlab.workers.dev), then repeat step 1 with `X-Paywall-Token` and
+`X-Paywall-Tx`. Free routes: `/.well-known/x402`, `/health`, `/v1/receipt/{requestId or tx hash}`, `/v1/refunds`.
+How it works and what "keyless" changes: [Public endpoint](#public-endpoint-keyless).
+
 ## Track 2 fit
 
 The track asks for "the A2A scenario combined with HSP's API interface, where the Payment Agent constructs a Payment
@@ -27,18 +52,18 @@ sentence lives in this repository, and how far it has been proven.
 | the Payment Agent constructs a Payment Mandate | `agent/hsp_payer.py`: checks the cart against a pinned merchant key, `cart_hash`, the documented cart rules, the resource, payee and AP2 spending limits, then builds the **Payment Mandate** in the wire format the hosted checkout uses | offline tests; field-by-field sources in [HSP_STATUS.md](HSP_STATUS.md#payer-wire-format-unverified-against-a-live-gateway) |
 | completes the wallet signature | EIP-3009 `TransferWithAuthorization` (EIP-712) over the token's domain as read on-chain, inside the mandate's x402 v2 `payment_payload` | offline tests, plus an independent Node.js check of the encoding |
 | verifies and executes through the existing Gateway of HSP | `server/hsp_gateway.py`: HashKey Merchant client (orders, payment queries, signed webhooks) and submission to `POST /api/v1/payment/pay-mandate` | built and tested against the mock; **not yet run against the live HSP gateway**: merchant credentials are requested and not issued |
-| the on-chain payment, on HSK Chain mainnet | [`HskPayPerRequest` `0x78C8…7F8c`](https://hsk.blockscout.com/address/0x78C8476772BC209C3df09Da5e129d0879cd57F8c): per-request settlement in USDC.e with on-chain refunds | live: 47 transactions, 34 paid requests, 6 refunds; [live proof](#live-proof-on-mainnet) and [dashboard](https://swiftbotlab.github.io/hsk-meter/) |
+| the on-chain payment, on HSK Chain mainnet | [`HskPayPerRequest` `0x78C8…7F8c`](https://hsk.blockscout.com/address/0x78C8476772BC209C3df09Da5e129d0879cd57F8c): per-request settlement in USDC.e with on-chain refunds | live: 63 transactions, 48 paid requests, 9 refunds (all endpoints, 2026-10-29); [live proof](#live-proof-on-mainnet), [public endpoint](#public-endpoint-keyless) and [dashboard](https://swiftbotlab.github.io/hsk-meter/) |
 
 ## Self-check: six judging dimensions
 
 | Dimension | What there is to check | Evidence |
 |---|---|---|
 | Track fit | every phrase of the track text maps to a component (table above); HSP is used as documented on the merchant side and as the checkout uses it on the payer side | [HSP gateway](#hsp-gateway-cart-mandate-payment-mandate-gateway), [HSP_STATUS.md](HSP_STATUS.md) |
-| Completeness | verified contract on mainnet, seller, buyer CLI, MCP server, a second agent that buys from the first, live dashboard, demo video, the HSP gateway rail | [live proof](#live-proof-on-mainnet), [dashboard](https://swiftbotlab.github.io/hsk-meter/), [video](https://swiftbotlab.github.io/hsk-meter/hsk-meter-demo.mp4) |
+| Completeness | verified contract on mainnet, an always-on public endpoint you can pay, seller, buyer CLI, MCP server, a second agent that buys from the first, live dashboard, demo video, the HSP gateway rail | [try it now](#try-it-now), [live proof](#live-proof-on-mainnet), [dashboard](https://swiftbotlab.github.io/hsk-meter/), [video](https://swiftbotlab.github.io/hsk-meter/hsk-meter-demo.mp4) |
 | Team | Swift Bot Labs; how we work | [Team](#team) |
 | Solution value | an API can charge 0.025-0.08 USDC.e per call, settled on-chain per request, and the payment comes back automatically when delivery fails; the buyer needs no gas token | [How a request is paid](#how-a-request-is-paid) |
 | Authenticity | every number links to a transaction; what is not done is written down (no live HSP gateway run yet) | [live proof](#live-proof-on-mainnet), [what waits on HashKey](HSP_STATUS.md#what-waits-on-hashkey) |
-| Code quality | CI on every push runs 300 tests: 210 Python tests with the network refused by a guard (4 more are online-only), 35 dashboard tests and 55 Foundry tests (unit, fuzz, invariants); guards mutation-checked; security notes per component | [CI](https://github.com/swiftbotlab/hsk-meter/actions/workflows/ci.yml), [SECURITY.md](SECURITY.md), [Run the tests](#run-the-tests) |
+| Code quality | CI on every push runs 359 tests: 216 Python tests with the network refused by a guard (4 more are online-only), 53 tests of the public endpoint, 35 dashboard tests and 55 Foundry tests (unit, fuzz, invariants); guards mutation-checked; security notes per component | [CI](https://github.com/swiftbotlab/hsk-meter/actions/workflows/ci.yml), [SECURITY.md](SECURITY.md), [Run the tests](#run-the-tests) |
 
 ## At a glance
 
@@ -221,8 +246,9 @@ python3 agent/buyer.py "http://localhost:8402/v1/hsk/address-profile?address=0x7
   --hsp --pin-adapter 0x4D281e0a98fD40Bb824F88D5e037bd8d03C4403a
 ```
 
-`http://localhost:8402` is the seller you run yourself (see "Seller" below and "Try it yourself"); there is no
-always-on public endpoint — the seller holds a hot settlement key, so it runs on demand, not as a public service.
+`http://localhost:8402` is the full seller you run yourself (see "Seller" below and "Try it yourself"). It holds a
+hot settlement key, so it pays the gas of `exact` payments and refunds automatically. The always-on
+[public endpoint](#public-endpoint-keyless) holds no key and takes `--scheme tx` payments.
 
 The buyer refuses to sign unless the quote is for chain 177, USDC.e, this contract, the pinned provider and payee,
 and the on-chain price, and unless the amount fits under `--max-price` and the session cap. It then verifies the
@@ -261,8 +287,9 @@ and the on-chain price, and unless the amount fits under `--max-price` and the s
 
 ### Try it yourself
 
-There is no always-on public endpoint (the seller holds a hot settlement key), so you run the seller and pay it
-yourself — one terminal each. Free routes need no payment: `curl http://localhost:8402/.well-known/x402` returns
+The quickest way is the always-on [public endpoint](#public-endpoint-keyless) (see [Try it now](#try-it-now)). For
+the full seller, with the gasless `exact` scheme, automatic refunds and the HSP-style receipts, you run the seller and
+pay it yourself — one terminal each. Free routes need no payment: `curl http://localhost:8402/.well-known/x402` returns
 the full x402 terms, and `GET /health` the live endpoint prices. A paid call looks like this (real mainnet
 response, trimmed):
 
@@ -279,6 +306,52 @@ $ python3 agent/buyer.py "http://localhost:8402/v1/hsk/address-profile?address=0
 ```
 
 For the two-hop A2A flow (Agent B pays Agent A), see `agent/A2A_DEMO.md`.
+
+## Public endpoint (keyless)
+
+[hsk-meter.swiftbotlab.workers.dev](https://hsk-meter.swiftbotlab.workers.dev) is a Cloudflare Worker (`worker/`)
+that sells the same two requests as `server/seller.py`, under the same wire protocol, and is always on. It holds no
+private key, so it takes the self-paid scheme only:
+
+1. `GET` a paid route with `X-Payer` → `402`, `PAYMENT-REQUIRED` mirrored in the body, `accepts[0]` with scheme
+   `hsk-paywall-tx`, the on-chain price, the contract, the quote token and the `requestId` (derived exactly as in
+   `server/protocol.py`: bound to the payer, the endpoint and this exact resource).
+2. The buyer calls `approve` and `pay(endpointId, requestId, amount)` on the contract from its own wallet.
+3. The same `GET` with `X-Payer`, `X-Paywall-Token` (and optionally `X-Paywall-Tx`) → the Worker reads
+   `getPayment(requestId)` and the `Paid` log by request id, checks payer, endpoint, amount, payee, refund flag and
+   age, claims the request id in its served-set, and answers `200` with the data, the payment and `PAYMENT-RESPONSE`.
+   The body has the same shape as the seller's answer; `worker/test/test_buyer_compat.py` checks that the data is
+   identical to what `server/seller.py` computes from the same chain state.
+
+| | Full seller (`server/seller.py`) | Public endpoint (`worker/`) |
+|---|---|---|
+| Keys on the server | provider key (hot), HSP adapter key, quote-token key | quote-token key only (cannot move funds) |
+| Payment schemes | `exact` (gasless for the buyer) and `hsk-paywall-tx` | `hsk-paywall-tx` (the buyer pays gas) |
+| Refund when delivery fails | automatic, on-chain | listed at `/v1/refunds`; the provider sends `refund(requestId)` |
+| Responses per payment | up to 3 within 1 h (lost-answer retries) | 1; a replay gets `429 already_served` |
+| HSP-style receipts, APRO USD estimate | yes | no |
+| Runs | on demand, in a bubblewrap sandbox | always, on Cloudflare (served-set in a Durable Object per request id) |
+
+`GET /v1/receipt/{requestId or tx hash}` is a free verifier for any payment on the contract: it decodes the `Paid` and
+`Refunded` events, cross-checks `getPayment`, and answers `ACCEPT` only when the payment is on-chain, matches its
+event, is not refunded and was made to an endpoint of this service (optional `?payer=`, `?endpoint=`, `?amount=`
+expectations). Details and the threat model: [SECURITY.md](SECURITY.md#public-endpoint-worker-cloudflare-worker-keyless).
+
+Live paid calls to the public endpoint (buyer `agent/buyer.py --scheme tx`, unchanged):
+
+| # | Request | Result | Transactions |
+|---|---|---|---|
+| W1 | address profile (settlement contract), 0.03 | `200` with the data; the buyer resent the same paid request: `429 already_served`, not charged again | approve [`0x4653b446…`](https://hsk.blockscout.com/tx/0x4653b446bd90cb0a739fed384c9e386836bf5405a78c5291963e61e67feb34d9), pay [`0x0c70d827…`](https://hsk.blockscout.com/tx/0x0c70d8276b168b04888595a5a3e2cf4d0dedcd148ab0946f5bdfdca7f388a282) |
+| W2 | tx check (of W1's payment), 0.025 | `200`; the data is identical to what `server/seller.py` computes for the same transaction; the paid headers replayed twice by hand: `429 already_served` both times | approve [`0x572624a5…`](https://hsk.blockscout.com/tx/0x572624a5fa7459cc0c490d69c97c812ff1391ad7469c57f8c1de39f8305d46c8), pay [`0xff58e942…`](https://hsk.blockscout.com/tx/0xff58e942ad8cb5ab1f1361bd1f630eb220accc143983fb9111546c3d49acc3ce) |
+| W3 | address profile (payee), 0.03 | `200` with the data | approve [`0x1dab8ceb…`](https://hsk.blockscout.com/tx/0x1dab8ceb2c2a011574bfb432eb41f700726ba6a64697c60b182768e8515afaa8), pay [`0xa1b22866…`](https://hsk.blockscout.com/tx/0xa1b2286647948b016f9ece81f4ddab3206322c76ffa078a63f6135245aaaa523) |
+
+Each row can be re-checked with the free verifier, for example
+`curl https://hsk-meter.swiftbotlab.workers.dev/v1/receipt/0xff58e942ad8cb5ab1f1361bd1f630eb220accc143983fb9111546c3d49acc3ce`
+(`ACCEPT`, served once by this endpoint).
+
+Deploy your own: `cd worker && npm ci && npx wrangler deploy`, then `npx wrangler secret put PAYWALL_TOKEN_KEY` (32
+random bytes in hex, from stdin) and change the constants at the top of `worker/src/core.js` (contract, provider,
+payee) to yours. `node worker/test/run.mjs` runs its tests offline.
 
 ## Use it from any MCP client
 
@@ -402,6 +475,9 @@ Full details and the threat model are in [SECURITY.md](SECURITY.md). In short:
   get signed. Per-client, per-payer and global rate limits; separate daily gas budgets for settlements and refunds;
   a low-balance alert; atomic per-request reservation (a payment settles once and is served at most 3 times within an
   hour); a refunded payment is never served; state is journaled and replayed at start.
+- **Public endpoint:** no private key at all; every paid answer is checked against `getPayment` and the `Paid` event
+  first, and each payment is served once (a Durable Object per request id serializes claims across Cloudflare
+  locations; a replay gets `429 already_served`). The only outbound host is the pinned RPC.
 - **Isolation:** the seller runs under bubblewrap with only its code, its Python environment, its own key directory
   (read-only) and its state directory visible, and an in-process egress guard that allows only the RPC host.
 - **Buyer and MCP server:** spend cap reserved before anything is signed, provider and payee pinned, every claim
@@ -506,6 +582,7 @@ Implemented today (`server/hsp_draft.py`, labeled `hsp-draft/swiftbotlab-0`):
 | `server/hsp_mockgw.py`, `server/test_hsp_gateway.py` | local mock gateway (documented shapes and checks) and its tests; `hsp_mockgw.py demo` runs the flow offline |
 | `deploy/` | `run_sandboxed.sh` (bubblewrap sandbox for the seller), `hsk-meter-seller.service` (systemd user unit template) and `sandbox_probe.py` (what the sandbox can reach) |
 | `ops/state/` | the mainnet deployment record and the public addresses of the demo roles |
+| `worker/` | the always-on public endpoint (Cloudflare Worker, keyless): `src/core.js` (protocol, payment verification, receipt verifier), `src/ledger.js` (served-set, one Durable Object per request id), `test/` (offline tests, shared vectors with `server/protocol.py`, end-to-end test with the unchanged buyer) |
 | `docs/` | the live dashboard (static page on GitHub Pages; `snapshot.json` is its fallback when the explorer API is down) |
 | `tools/` | `dashboard_snapshot.py` (refreshes the fallback snapshot, incl. a checked USDC/USD reading), `test_dashboard.js` (decoder, counter and USD tests) and `ci_offline.py` (runs a test suite with every non-loopback connection refused) |
 | `.github/workflows/ci.yml`, `constraints.txt` | CI: every suite below on each push, offline, with pinned dependencies, actions pinned by commit and a checksum-checked solc |
@@ -525,6 +602,8 @@ python3 agent/test_mcp.py             # MCP server end to end against the real s
 python3 server/test_ecosystem.py      # APRO feeds (quote USD, gas guard, buyer USD view) and KYC SBT mode (29 offline tests)
 python3 server/test_hsp_gateway.py    # HSP gateway rail against the mock gateway: HMAC, ES256K, carts, webhooks, A2A flow, payer wire format (43 tests)
 node tools/test_dashboard.js          # dashboard decoder and USD value: only endpoints 1 and 2 of our provider count, hostile logs dropped (35 tests)
+(cd worker && npm ci --omit=dev --ignore-scripts) && node worker/test/run.mjs   # public endpoint: replay, races, wrong amount/endpoint/payer, refund listing, receipts (53 tests)
+python3 worker/test/test_buyer_compat.py   # the unchanged buyer pays the public endpoint's code end to end on the offline chain model (6 tests)
 python3 server/test_ecosystem.py --online                                     # adds read-only checks of the real feeds and SBT
 HSK_METER_BUYER_KEY_FILE=buyer.env python3 server/test_protocol.py --online   # adds read-only checks against the live contract
 HSK_METER_BUYER_KEY_FILE=buyer.env python3 server/test_live.py                # hostile-input tests against a running seller (pays nothing)

@@ -1,7 +1,8 @@
 name: CI
 
 # Offline by design: no secrets, no keys, no calls to HashKey Chain or any gateway. Every Python suite runs under
-# tools/ci_offline.py, which refuses any non-loopback connection or name lookup (its self-test runs first).
+# tools/ci_offline.py, which refuses any non-loopback connection or name lookup (its self-test runs first). Only the
+# pinned dependencies are downloaded (pip with constraints, npm ci from the Worker's lockfile without install scripts).
 
 on:
   push:
@@ -66,6 +67,19 @@ jobs:
       - name: Dashboard (snapshot tool against a local mock)
         if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
         run: node tools/test_dashboard.js
+      - name: Public Worker dependencies (lockfile, integrity-checked, no install scripts)
+        id: wdeps
+        if: ${{ !cancelled() }}
+        working-directory: worker
+        run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+      - name: Public Worker (keyless endpoint) offline tests
+        if: ${{ !cancelled() && steps.wdeps.outcome == 'success' }}
+        run: node worker/test/run.mjs
+      - name: Public Worker paid by the unchanged buyer, end to end on the offline chain model
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' && steps.wdeps.outcome == 'success' }}
+        env:
+          HSK_REQUIRE_WORKER: "1"
+        run: python tools/ci_offline.py worker/test/test_buyer_compat.py
 
   contracts:
     name: Contract tests (Foundry, offline)

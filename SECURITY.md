@@ -209,6 +209,78 @@ off the network targets become reachable.
   token, chain and validity. The payment agent never treats an HS256 JWT it receives as proof of anything.
 - The mock gateway (`server/hsp_mockgw.py`) is for tests only: loopback, in memory, no chain, no funds.
 
+## Public endpoint (`worker/`, Cloudflare Worker, keyless)
+
+The always-on endpoint `https://hsk-meter.swiftbotlab.workers.dev` sells the same two requests as the seller, over the
+same wire protocol, but it holds **no private key**. It offers only the self-paid scheme `hsk-paywall-tx`: the buyer
+calls `pay(endpointId, requestId, amount)` itself and the Worker verifies that payment on-chain. It cannot submit
+signed `exact` authorizations, pay gas, refund, change prices or touch credit.
+
+What it holds, and what a compromise means:
+
+- Its only secret is `PAYWALL_TOKEN_KEY`, the HMAC key of the quote tokens (a Worker secret, never in the code, the
+  repository or the logs). It cannot move funds. With it, someone could mint quote tokens, which still have to be paid
+  on-chain from the bound payer address before anything is served. Rotating it invalidates outstanding quotes; a
+  request paid against an old token can then no longer be served and is refunded by the provider. The token's HMAC
+  context names this service, so a token of the full seller never verifies here, even if a key were ever shared.
+- Whoever controls the Cloudflare account could change the code, for example to serve without payment or to report
+  false receipts. They still cannot move funds: payments credit the payee inside the contract, and only the payee key,
+  which is never on any server, can withdraw. Buyers do not have to trust the endpoint's word: `agent/buyer.py`
+  re-checks the `Paid` event and `getPayment` itself.
+
+Threats and what stops them:
+
+- Data without a matching payment: the request id is recomputed from `X-Payer`, the exact resource and the quote
+  token. The token carries the quoted price, and its HMAC must verify for that payer, endpoint, resource and price.
+  The Worker then reads `getPayment(requestId)` and the `Paid` log by request id in the block `getPayment` names (a
+  transaction hash sent by the client is never fetched). Payer, endpoint, amount (must equal the quoted price), payee,
+  refund flag and age (paid less than 1 h ago) must all match, and the endpoint must belong to the pinned provider and
+  payee. A zero `X-Payer` is refused (it would yield an unbound request id).
+- Data twice for one payment (replays, concurrent requests in different isolates or Cloudflare locations): every paid
+  request id has its own Durable Object, which serializes its state changes (strongly consistent; Workers KV is
+  eventually consistent and could let a race through, so it is not used). A request first claims the id (a lease of
+  60 s), computes the answer, commits "served", and only then sends the data; a commit whose call errored is
+  confirmed by its claim id before anything is sent. A replay gets `429 already_served` after one `getPayment` read.
+  If the Durable Object cannot be reached, nothing is served (`503`). Each payment buys one response (the full seller
+  allows 3 re-serves; this endpoint allows none, so a response lost in transit is not re-sent).
+- Paid but not served: if the chain cannot be read, or the transaction to check is not found (a lagging node), the
+  claim is released and the same request can be retried. A transaction check that still finds nothing after 3 tries
+  over 2 minutes, and a payment whose buyer comes back after the 1 h window without having been served, are marked
+  undeliverable and listed at `/v1/refunds` (re-listed on every later retry if the listing failed). The provider
+  refunds them on-chain with `refund(requestId)`: refunds are an operator step here because the Worker has no key. A
+  buyer who pays and never comes back is not detected by the Worker; `/v1/receipt/<requestId>` then shows "not served,
+  the window is over" for the provider to refund.
+- SSRF: the only outbound host is the pinned constant `https://mainnet.hsk.xyz`; no request input becomes part of a
+  URL. Redirects are not followed, responses are capped at 1 MB (256 KB for transaction receipts), each call times out
+  after 8 s and one request may make at most 2 x 40 RPC calls.
+- Inputs: a route allow-list, exactly one query parameter per paid route with an exact hex pattern, header formats
+  checked (`X-Payer` 20 bytes, token and tx 32 bytes), URLs over 400 characters refused, `GET` and `OPTIONS` only.
+- Cost amplification: per client (IPv4 address or IPv6 /64) 60 quotes, 30 paid retries, 30 receipt checks and 120
+  free requests per minute, plus 4x that per IPv6 /48 and 20x per isolate, counted in the isolate and by Cloudflare's
+  rate-limit bindings at each location. Verify requests for unpaid request ids never touch the Durable Objects. A
+  transaction check for a hash that is not on chain gets a free `404`, and one whose receipt is over 256 KB a free
+  `422`, before any payment; mined answers are cached for 10 minutes. The receipt verifier reads one 5,000-block window
+  for a refund (`getPayment` decides), looks at no more than 2 payments per transaction, caches answers for 30 s, and
+  says nothing about transactions without the contract's events (checking those is what endpoint 2 sells).
+- Availability: on the Workers free plan every request, refused or not, counts against the account's daily request
+  quota, and nothing inside a Worker can prevent that. A flood can make the endpoint unavailable until the quota resets
+  (00:00 UTC); it cannot make it serve without payment. The fix is a WAF rate-limit rule in front of a custom domain.
+- CORS: `Access-Control-Allow-Origin: *` without credentials (a public read API with no cookies or sessions); only
+  the protocol's headers are allowed and exposed. The home page is static HTML without scripts under
+  `Content-Security-Policy: default-src 'none'`; values shown in it are escaped.
+- Logs: path, status, duration, request-id prefix, payer and transaction hash; never tokens or headers. Per-request
+  invocation logs are turned off, so request headers are not stored by the platform either.
+- Payments are verified at the `latest` block, as the full seller does; a reorg after serving would undo a payment of
+  a few cents.
+- Tests: `worker/test/run.mjs` (offline, 53 tests: replay, races, wrong amount, wrong endpoint, wrong payer, forged
+  tokens, price changes, refunded, expired, refund listing, lease expiry, served-set outages, RPC faults, rate limits,
+  receipt verdicts), checked against the Python reference with shared vectors; mutation-checked (26 of 27 guard
+  mutants killed; the survivor, dropping the explicit redirect check, is equivalent because redirects are never
+  followed). `worker/test/test_buyer_compat.py` runs the unchanged buyer against the Worker end to end on the offline
+  chain model. An independent security review found no way to get data without a matching payment or twice for one
+  payment; its findings on refund listing, cost amplification, receipt size, token context and logging are fixed as
+  described above.
+
 ## Known limitations
 
 All three are low severity and not fixed yet. The first and the third never cost the buyer an extra payment; the
@@ -238,6 +310,8 @@ second can lead to one extra purchase, only in the rare case described.
 - Solidity: OpenZeppelin 5.1.0 and forge-std v1.16.2, vendored unmodified; provenance and hashes in
   `contracts/DEPENDENCIES.md`, re-checked by `contracts/verify_deps.sh`.
 - Python: pinned in `requirements.txt`.
+- Worker: `@noble/hashes` 2.4.0 (keccak-256) and, for deploying only, `wrangler` 4.151.1, pinned with integrity
+  hashes in `worker/package-lock.json`; installed with `npm ci --ignore-scripts`.
 
 ## Reporting
 

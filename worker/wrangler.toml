@@ -1,0 +1,46 @@
+# HSK Meter public endpoint (Swift Bot Labs): https://hsk-meter.swiftbotlab.workers.dev
+# Keyless: no private key. The only secret is PAYWALL_TOKEN_KEY (the quote-token HMAC key, 32 random bytes in hex),
+# set with `wrangler secret put PAYWALL_TOKEN_KEY` from stdin; it cannot move funds.
+# Deploy (tests gate it): node test/run.mjs && wrangler deploy   (credentials from the environment, never in this file)
+name = "hsk-meter"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+preview_urls = false
+
+# Workers Logs keep only what the code logs (no tokens or headers); per-request invocation logs are off
+[observability]
+enabled = true
+
+[observability.logs]
+invocation_logs = false
+
+# the served-set: one Durable Object per paid requestId (strongly consistent; SQLite-backed, available on the free plan)
+[[durable_objects.bindings]]
+name = "LEDGER"
+class_name = "Ledger"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Ledger"]
+
+# per-client limits at each Cloudflare location, on top of the in-isolate limiter in src/app.js
+[[ratelimits]]
+name = "RL_QUOTE"
+namespace_id = "177001"
+simple = { limit = 60, period = 60 }
+
+[[ratelimits]]
+name = "RL_VERIFY"
+namespace_id = "177002"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "RL_RECEIPT"
+namespace_id = "177003"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "RL_FREE"
+namespace_id = "177004"
+simple = { limit = 120, period = 60 }

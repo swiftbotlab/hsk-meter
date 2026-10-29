@@ -1,0 +1,17 @@
+{
+  "name": "hsk-meter-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "HSK Meter keyless public endpoint: HashKey Chain data paid per request in USDC.e, verified on-chain (Cloudflare Worker).",
+  "type": "module",
+  "scripts": {
+    "test": "node test/run.mjs"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.4.0"
+  },
+  "devDependencies": {
+    "wrangler": "4.151.1"
+  },
+  "license": "MIT"
+}
