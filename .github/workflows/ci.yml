@@ -1,0 +1,80 @@
+name: CI
+
+# Offline by design: no secrets, no keys, no calls to HashKey Chain or any gateway. Every Python suite runs under
+# tools/ci_offline.py, which refuses any non-loopback connection or name lookup (its self-test runs first).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python + dashboard tests (offline)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: "22"
+      - name: Install pinned dependencies
+        run: python -m pip install --disable-pip-version-check --no-input -r requirements.txt -c constraints.txt
+      - name: Bubblewrap for the seller sandbox tests
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Offline guard self-test (loopback works, everything else is refused)
+        run: python tools/ci_offline.py --selftest
+      - name: HSP gateway rail (receiving agent, payment agent, mock gateway, payer wire format)
+        run: python tools/ci_offline.py server/test_hsp_gateway.py
+      - name: x402 protocol + HSP draft
+        run: python tools/ci_offline.py server/test_protocol.py
+      - name: Seller security (rate limits, egress guard, sandbox launcher)
+        run: python tools/ci_offline.py server/test_security.py
+      - name: HashKey ecosystem (APRO feeds, KYC SBT mode)
+        run: python tools/ci_offline.py server/test_ecosystem.py
+      - name: Buyer
+        run: python tools/ci_offline.py agent/test_buyer.py
+      - name: MCP server
+        run: python tools/ci_offline.py agent/test_mcp.py
+      - name: Agent-to-agent (Agent B pays Agent A)
+        run: python tools/ci_offline.py agent/test_agent_b.py
+      - name: Dashboard (snapshot tool against a local mock)
+        run: node tools/test_dashboard.js
+
+  contracts:
+    name: Contract tests (Foundry, offline)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09  # v1.9.1
+        with:
+          version: v1.8.5
+          cache: false
+      - name: solc 0.8.28 (official build, sha256 from binaries.soliditylang.org/linux-amd64/list.json)
+        run: |
+          curl -fsSL --max-time 120 -o "$RUNNER_TEMP/solc" \
+            "https://binaries.soliditylang.org/linux-amd64/solc-linux-amd64-v0.8.28+commit.7893614a"
+          echo "9a0fb7e0db2c0641dbae1c5cc645dc686820c83af516226abb1c0a2f76636f25  $RUNNER_TEMP/solc" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/solc"
+      - name: forge test (unit, fuzz, invariants, gas)
+        working-directory: contracts
+        run: forge test --use "$RUNNER_TEMP/solc"

@@ -1,5 +1,7 @@
 # HSK Meter
 
+[![CI](https://github.com/swiftbotlab/hsk-meter/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/swiftbotlab/hsk-meter/actions/workflows/ci.yml)
+
 **One agent pays another for every API request, in USDC.e on HashKey Chain, settled on-chain per request.**
 If the seller cannot deliver after it has been paid, the payment is refunded on-chain automatically, and on the
 default x402 path the buyer needs no gas token. With an HSP-style mandate attached, the seller ships the data only after a verifier has
