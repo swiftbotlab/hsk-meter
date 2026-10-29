@@ -111,7 +111,6 @@ class _Cache:
 def _call_view(role, policy, r):
     return {"role": role, "policy": policy, "servedModel": r.get("servedModel"), "provider": r.get("provider"),
             "fallback": r.get("fallback"), "attempts": r.get("attempts"), "costUsd": round(r.get("costUsd") or 0, 6),
-            "toolFeesUsd": r.get("toolFeesUsd"),
             "requestId": r.get("requestId"), "ms": r.get("ms"),
             "tools": [{"type": t["type"], "status": t["status"]} for t in r.get("toolCalls") or []]}
 

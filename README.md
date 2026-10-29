@@ -9,6 +9,11 @@ checked the adapter-signed receipt against the buyer's signed mandate.
 
 By Swift Bot Labs, for the HashKey Chain Horizon Hackathon (India), track **Agent Payments & A2A Settlement**.
 
+> [!NOTE]
+> **Branch `otari-gateway`: a paid AI endpoint answered through [Otari](https://otari.ai).** `GET /v1/ai/ask` (endpoint 4,
+> 0.03 USDC.e) routes each question across four open-weight models behind Otari routing policies, gives every buyer its
+> own Otari budget, and refunds the payment on-chain when Otari refuses or cannot answer. See [OTARI.md](OTARI.md).
+
 **Watch the overview on YouTube (1:17):** [youtu.be/t2yyd76qRlc](https://youtu.be/t2yyd76qRlc): a paid call on
 mainnet, an automatic refund, one agent paying another, and the HSP rail, with captions. The full 2:54 walkthrough
 is under [At a glance](#at-a-glance).

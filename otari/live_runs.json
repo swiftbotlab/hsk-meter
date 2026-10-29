@@ -1,0 +1,409 @@
+{
+ "about": "Live paid calls of GET /v1/ai/ask on HashKey Chain mainnet (endpoint 4 of HskPayPerRequest 0x78C8476772BC209C3df09Da5e129d0879cd57F8c, 0.03 USDC.e), 2026-10-29, made with agent/buyer.py against the seller on this branch. Every settlement and refund was verified on-chain by the buyer. Otari request ids match the organization's usage records.",
+ "endpointRegistration": "https://hsk.blockscout.com/tx/0x112bcfb88f3abecf6b1d5e7723dfaa01a90ccc1f3c33c3f237c18c39b234c67c",
+ "runs": [
+  {
+   "run": "paid1",
+   "note": "served: balances from the seller's own reads, arithmetic by the answer model",
+   "httpStatus": 200,
+   "payment": "settled",
+   "question": "how much usdc.e and hsk does 0x5270fe01fd3d6148b687da0b5693b0425cfca361 hold, and how many 0.03 usdc.e questions can it still pay for?",
+   "requestId": "0x5270fe01fd3d6148b687da0b5693b0425cfca3610e93472783148d18ffe24731",
+   "settlementTx": "https://hsk.blockscout.com/tx/0x6caf020d88f1cc9cda42f94e3175ffed0e768bf7df9aa6c20f9aea85028394fc",
+   "refundTx": null,
+   "sellerMessage": null,
+   "answer": "HSK balance: 1.277589 HSK  \nUSDC.e balance: 0.326206 USDC.e  \n\nAt a cost of 0.03 USDC.e per question, the address can cover 0.326206 \u00f7 0.03 \u2248 10.87 questions, i.e., 10 full 0.03 USDC.e questions.",
+   "verdict": "pass",
+   "otari": {
+    "tier": "dedicated",
+    "screen": {
+     "guard": {
+      "verdict": "safe",
+      "categories": "None"
+     },
+     "route": {
+      "in_scope": true,
+      "needs_web": false,
+      "needs_math": true
+     }
+    },
+    "calls": [
+     {
+      "role": "guard",
+      "policy": "hsk-guard",
+      "servedModel": "Qwen3Guard-Gen-8B",
+      "provider": "ovhcloud",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0,
+      "requestId": "cd8caa28-1b51-454d-a161-f7497e890313",
+      "ms": 1786
+     },
+     {
+      "role": "route",
+      "policy": "hsk-route",
+      "servedModel": "ministral-3b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 2e-05,
+      "requestId": "2f20273b-e7ed-4e31-a84e-d1ccc659a89e",
+      "ms": 2363
+     },
+     {
+      "role": "answer",
+      "policy": "hsk-answer",
+      "servedModel": "openai/gpt-oss-120b",
+      "provider": "deepinfra",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 9.9e-05,
+      "requestId": "ae62e117-d3bd-43bc-86f2-29dac11bcc93",
+      "ms": 7285
+     },
+     {
+      "role": "verify",
+      "policy": "hsk-verify",
+      "servedModel": "ministral-8b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 9.8e-05,
+      "requestId": "6e2efb92-8a34-4b35-ac38-63c2e0458b60",
+      "ms": 4027
+     }
+    ],
+    "buyerCostUsd": 0.000197
+   }
+  },
+  {
+   "run": "b1",
+   "note": "served on Agent B's buyer key (budget: 2 Otari requests a day; answer + verify use both)",
+   "httpStatus": 200,
+   "payment": "settled",
+   "question": "what is the hsk balance and nonce of 0x7a0384f0b947a99da8fea7439950e60b41d44130 on hashkey chain?",
+   "requestId": "0x7a0384f0b947a99da8fea7439950e60b41d4413006cdb2a5627c06106e7c1134",
+   "settlementTx": "https://hsk.blockscout.com/tx/0x2ce1e031d114af3a01409c2debd5757f17f54311493b812a9d924a52ac52097e",
+   "refundTx": null,
+   "sellerMessage": null,
+   "answer": "HSK balance: 0 HSK. Nonce: 0",
+   "verdict": "fixed",
+   "otari": {
+    "tier": "dedicated",
+    "screen": {
+     "guard": {
+      "verdict": "safe",
+      "categories": "None"
+     },
+     "route": {
+      "in_scope": true,
+      "needs_web": false,
+      "needs_math": false
+     }
+    },
+    "calls": [
+     {
+      "role": "guard",
+      "policy": "hsk-guard",
+      "servedModel": "Qwen3Guard-Gen-8B",
+      "provider": "ovhcloud",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0,
+      "requestId": "6b9d9817-1ab2-44d4-9939-86e995acef5c",
+      "ms": 1486
+     },
+     {
+      "role": "route",
+      "policy": "hsk-route",
+      "servedModel": "ministral-3b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 1.5e-05,
+      "requestId": "b6842532-1782-4968-8004-78737d011a69",
+      "ms": 1448
+     },
+     {
+      "role": "answer",
+      "policy": "hsk-answer",
+      "servedModel": "openai/gpt-oss-120b",
+      "provider": "deepinfra",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 7.5e-05,
+      "requestId": "8fb326dc-5d8e-4533-b019-5ddfe82ff1f3",
+      "ms": 3962
+     },
+     {
+      "role": "verify",
+      "policy": "hsk-verify",
+      "servedModel": "ministral-8b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 7.9e-05,
+      "requestId": "5dc31aaa-e0de-488c-9e91-c812cad10910",
+      "ms": 3421
+     }
+    ],
+    "buyerCostUsd": 0.000154
+   }
+  },
+  {
+   "run": "b2",
+   "note": "same buyer, second question: Otari refused the answer call with budget_exceeded -> refunded on-chain",
+   "httpStatus": 429,
+   "payment": "refunded",
+   "question": "how much usdc.e does 0x7a0384f0b947a99da8fea7439950e60b41d44130 hold on hashkey chain right now?",
+   "requestId": "0x7a0384f0b947a99da8fea7439950e60b41d441301896733a647d417cb45e549b",
+   "settlementTx": "https://hsk.blockscout.com/tx/0x17b38f7b832196be2dc003086e34bbd94852d7dd5a030f3b5eeee2b491816b88",
+   "refundTx": "https://hsk.blockscout.com/tx/0xcac45800160fe190e1aa41fef0196be14a20601721a6b134bda6518265ffbd44",
+   "sellerMessage": "your AI budget at this seller (your Otari key's spend ceiling) is used up for today (resets 00:00 UTC)"
+  },
+  {
+   "run": "b3",
+   "note": "same buyer, third question: refused at the quote (429 ai_budget_exhausted), nothing signed or charged",
+   "httpStatus": 429,
+   "payment": null,
+   "question": "what is the latest block number on hashkey chain?",
+   "requestId": null,
+   "settlementTx": null,
+   "refundTx": null,
+   "sellerMessage": "the AI budget that pays for your questions is used up for today (resets 00:00 UTC); nothing was charged"
+  },
+  {
+   "run": "m2",
+   "note": "web search question: 3 searches ($0.03) pushed the buyer's key past its $0.02 ceiling, the verify call was refused -> refunded on-chain (led to max_uses 1 and a raised per-buyer budget)",
+   "httpStatus": 429,
+   "payment": "refunded",
+   "question": "according to the official hashkey chain docs, what is the mainnet chain id and public rpc url, and is 0x054ed45810dbbab8b27668922d110669c9d88d0a the usdc.e token there?",
+   "requestId": "0x5270fe01fd3d6148b687da0b5693b0425cfca3617d200279abf6914ac3779863",
+   "settlementTx": "https://hsk.blockscout.com/tx/0xcb3b4fb531ca14d8287561dfdd58f3010801bfe3cbb538fd2e6f308b791bedd8",
+   "refundTx": "https://hsk.blockscout.com/tx/0x395d08669135aed90e0e559a9b8baf4f9ceac45d8fd336655a3fc3e191f6a049",
+   "sellerMessage": "your AI budget at this seller (your Otari key's spend ceiling) is used up for today (resets 00:00 UTC)"
+  },
+  {
+   "run": "m3",
+   "note": "served, but WRONG (RPC URL and USDC.e): grounding fixed in bcf27b0; the same question now answers correctly without a search",
+   "httpStatus": 200,
+   "payment": "settled",
+   "question": "according to the official hashkey chain docs, what is the mainnet chain id and public rpc url, and is 0x054ed45810dbbab8b27668922d110669c9d88d0a the usdc.e token there?",
+   "requestId": "0x5270fe01fd3d6148b687da0b5693b0425cfca3618ff8dffc6043ece248e819a0",
+   "settlementTx": "https://hsk.blockscout.com/tx/0x110544755b83fa737ff2c3a51d2da66dcf8e300abbd64e85017087ffa515ee29",
+   "refundTx": null,
+   "sellerMessage": null,
+   "answer": "Mainnet chain ID: 177  \nPublic RPC URL (official docs): https://rpc.hashkeychain.org  \n\nThe address 0x054ed45810dbbab8b27668922d110669c9d88d0a is a contract on HashKey Chain, but its token balances show USDC.e with a zero balance; it is not the USDC.e token contract on this network.",
+   "verdict": "pass",
+   "otari": {
+    "tier": "dedicated",
+    "screen": {
+     "guard": {
+      "verdict": "safe",
+      "categories": "None"
+     },
+     "route": {
+      "in_scope": true,
+      "needs_web": true,
+      "needs_math": false
+     }
+    },
+    "calls": [
+     {
+      "role": "guard",
+      "policy": "hsk-guard",
+      "servedModel": "Qwen3Guard-Gen-8B",
+      "provider": "ovhcloud",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0,
+      "requestId": "d8ce6891-6980-4a12-a955-c7761095d2ed",
+      "ms": 1848
+     },
+     {
+      "role": "route",
+      "policy": "hsk-route",
+      "servedModel": "ministral-3b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 2.1e-05,
+      "requestId": "80a526b7-7df9-4e48-93f5-56df24b9c798",
+      "ms": 2051
+     },
+     {
+      "role": "answer",
+      "policy": "hsk-answer",
+      "servedModel": "openai/gpt-oss-120b",
+      "provider": "deepinfra",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0.010196,
+      "requestId": "ff291469-a461-42a3-8d1d-d33d86b4bc09",
+      "ms": 11664
+     },
+     {
+      "role": "verify",
+      "policy": "hsk-verify",
+      "servedModel": "ministral-8b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0.000104,
+      "requestId": "f9536fbe-9eb7-41c0-8f7f-a25b2b3f2946",
+      "ms": 4105
+     }
+    ],
+    "buyerCostUsd": 0.0103
+   }
+  },
+  {
+   "run": "m4_drill",
+   "note": "fault drill (seller started with --ai-answer-policy hsk-answer-drill): broken primary absorbed, Otari fell over to gpt-oss-120b (Otari-Fallback true, 2 attempts); Blockscout MCP tools ran",
+   "httpStatus": 200,
+   "payment": "settled",
+   "question": "which contract method did transaction 0x6caf020d88f1cc9cda42f94e3175ffed0e768bf7df9aa6c20f9aea85028394fc call on hashkey chain, and how much usdc.e moved?",
+   "requestId": "0x5270fe01fd3d6148b687da0b5693b0425cfca3611e273eb79bfc74132b5d5463",
+   "settlementTx": "https://hsk.blockscout.com/tx/0xa43e3a2f1680b68dd6ad57d9f37d9a87d3737d989e8f08adbc8c95b078b797dc",
+   "refundTx": null,
+   "sellerMessage": null,
+   "answer": "The transaction 0x6caf020d88f1cc9cda42f94e3175ffed0e768bf7df9aa6c20f9aea85028394fc called a function on the settlement contract 0x78c8476772bc209c3df09da5e129d0879cd57f8c (the exact method name is not available from the provided data). It transferred 0.030 USDC.e.",
+   "verdict": "pass",
+   "otari": {
+    "tier": "dedicated",
+    "screen": {
+     "guard": {
+      "verdict": "safe",
+      "categories": "None"
+     },
+     "route": {
+      "in_scope": true,
+      "needs_web": false,
+      "needs_math": false
+     }
+    },
+    "calls": [
+     {
+      "role": "guard",
+      "policy": "hsk-guard",
+      "servedModel": "Qwen3Guard-Gen-8B",
+      "provider": "ovhcloud",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0,
+      "requestId": "2a022130-3425-4b95-811e-f0fc77ef7b34",
+      "ms": 1515
+     },
+     {
+      "role": "route",
+      "policy": "hsk-route",
+      "servedModel": "ministral-3b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 1.7e-05,
+      "requestId": "832b8585-b7c9-4179-91e4-ca3354634349",
+      "ms": 1353
+     },
+     {
+      "role": "answer",
+      "policy": "hsk-answer-drill",
+      "servedModel": "openai/gpt-oss-120b",
+      "provider": "deepinfra",
+      "fallback": true,
+      "attempts": 2,
+      "costUsd": 0.000419,
+      "requestId": "3c9cf272-f15b-4c0e-a6ec-7c6a50c19830",
+      "ms": 23658
+     },
+     {
+      "role": "verify",
+      "policy": "hsk-verify",
+      "servedModel": "ministral-8b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0.000184,
+      "requestId": "d92bb328-8e1c-4a32-afb6-fbaec28f0da8",
+      "ms": 3538
+     }
+    ],
+    "buyerCostUsd": 0.000603
+   }
+  },
+  {
+   "run": "m5_code",
+   "note": "served with Otari code execution (billed 1 sandbox call, $0.01)",
+   "httpStatus": 200,
+   "payment": "settled",
+   "question": "if 0x5270fe01fd3d6148b687da0b5693b0425cfca361 pays 0.03 usdc.e per question and 1 in 5 questions is refunded, how many questions can its current usdc.e balance pay for? compute it exactly.",
+   "requestId": "0x5270fe01fd3d6148b687da0b5693b0425cfca3618169857fac74df37156ce3a6",
+   "settlementTx": "https://hsk.blockscout.com/tx/0x7c9c9d8e93a6b00e4b081b332e0621e0c880202c59f87a6b74e3a248e0c34913",
+   "refundTx": null,
+   "sellerMessage": null,
+   "answer": "The address holds 0.266206 USDC.e. Each question costs 0.03 USDC.e, but 1 in 5 questions is refunded, so the effective cost per paid question is 0.03 \u00d7 4/5 = 0.024 USDC.e.  \n\n0.266206 \u00f7 0.024 \u2248 11.09, so it can pay for 11 full questions (the 12th would exceed the balance).",
+   "verdict": "pass",
+   "otari": {
+    "tier": "dedicated",
+    "screen": {
+     "guard": {
+      "verdict": "safe",
+      "categories": "None"
+     },
+     "route": {
+      "in_scope": true,
+      "needs_web": false,
+      "needs_math": true
+     }
+    },
+    "calls": [
+     {
+      "role": "guard",
+      "policy": "hsk-guard",
+      "servedModel": "Qwen3Guard-Gen-8B",
+      "provider": "ovhcloud",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0,
+      "requestId": "1b915106-adf4-4f84-ba84-8c132341e2b2",
+      "ms": 1398
+     },
+     {
+      "role": "route",
+      "policy": "hsk-route",
+      "servedModel": "ministral-3b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 2.2e-05,
+      "requestId": "91f43a7b-e910-4466-9568-4acbbae7ce91",
+      "ms": 1553
+     },
+     {
+      "role": "answer",
+      "policy": "hsk-answer",
+      "servedModel": "openai/gpt-oss-120b",
+      "provider": "deepinfra",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0.010204,
+      "requestId": "29f5df6e-ef80-4a64-a6a0-e686e1bc796d",
+      "ms": 11181
+     },
+     {
+      "role": "verify",
+      "policy": "hsk-verify",
+      "servedModel": "ministral-8b-2512",
+      "provider": "mistral",
+      "fallback": false,
+      "attempts": 1,
+      "costUsd": 0.000143,
+      "requestId": "9e8d9685-fc31-4878-8678-7f4b5d53fd44",
+      "ms": 2323
+     }
+    ],
+    "buyerCostUsd": 0.010347
+   }
+  }
+ ]
+}

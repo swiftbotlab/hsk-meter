@@ -1,0 +1,218 @@
+{
+ "about": "The Otari (otari.ai) configuration HSK Meter's paid AI endpoint runs on, as set through the dashboard and its API. No secrets: keys live only in the seller's Otari key directory, one OTARI_API_KEY per 0600 file. deepinfra:BAAI/bge-m3 is on the allow-lists only as the deliberately broken primary of the hsk-answer-drill fault drill.",
+ "workspace": "Default workspace of the Swift Bot Labs organization (hosted otari.ai)",
+ "budgets": {
+  "screen-daily": {
+   "max_budget": 0.05,
+   "request_limit": 400,
+   "reset_alignment": "calendar_day"
+  },
+  "ai-pool-daily": {
+   "max_budget": 0.2,
+   "request_limit": 150,
+   "reset_alignment": "calendar_day"
+  },
+  "per-buyer-default": {
+   "max_budget": 0.1,
+   "request_limit": 40,
+   "reset_alignment": "calendar_day"
+  },
+  "buyer-demo-tight": {
+   "max_budget": 0.02,
+   "request_limit": 2,
+   "reset_alignment": "calendar_day"
+  },
+  "workspace-daily": {
+   "max_budget": 0.4,
+   "reset_alignment": "calendar_day"
+  },
+  "org-safety-cap": {
+   "max_budget": 1.5,
+   "reset_alignment": "calendar_month"
+  }
+ },
+ "keys": {
+  "hsk-meter-screen": {
+   "keyFile": "screen.env",
+   "allowedModels": [
+    "ovhcloud:Qwen3Guard-Gen-0.6B",
+    "ovhcloud:Qwen3Guard-Gen-8B",
+    "mistral:ministral-3b-2512",
+    "bedrock:mistral.ministral-3-3b-instruct"
+   ],
+   "spendCeiling": "screen-daily",
+   "note": "pre-payment screening only: guard + router models"
+  },
+  "hsk-meter-pool": {
+   "keyFile": "pool.env",
+   "allowedModels": [
+    "deepinfra:openai/gpt-oss-120b",
+    "deepinfra:openai/gpt-oss-20b",
+    "nebius:openai/gpt-oss-120b",
+    "ovhcloud:gpt-oss-120b",
+    "mistral:ministral-8b-2512",
+    "bedrock:mistral.ministral-3-8b-instruct",
+    "deepinfra:Qwen/Qwen3.5-9B",
+    "deepinfra:BAAI/bge-m3"
+   ],
+   "spendCeiling": "ai-pool-daily",
+   "note": "buyers without a key of their own share this ceiling; hsk-answer serves them gpt-oss-20b"
+  },
+  "hsk-buyer-0x5270fe01": {
+   "keyFile": "buyers/0x5270fe01fd3d6148b687da0b5693b0425cfca361.env",
+   "allowedModels": [
+    "deepinfra:openai/gpt-oss-120b",
+    "deepinfra:openai/gpt-oss-20b",
+    "nebius:openai/gpt-oss-120b",
+    "ovhcloud:gpt-oss-120b",
+    "mistral:ministral-8b-2512",
+    "bedrock:mistral.ministral-3-8b-instruct",
+    "deepinfra:Qwen/Qwen3.5-9B",
+    "deepinfra:BAAI/bge-m3"
+   ],
+   "spendCeiling": "per-buyer-default",
+   "note": "dedicated key of buyer 0x5270...a361: its ceiling is that buyer's AI budget"
+  },
+  "hsk-buyer-0x7a0384f0": {
+   "keyFile": "buyers/0x7a0384f0b947a99da8fea7439950e60b41d44130.env",
+   "allowedModels": [
+    "deepinfra:openai/gpt-oss-120b",
+    "deepinfra:openai/gpt-oss-20b",
+    "nebius:openai/gpt-oss-120b",
+    "ovhcloud:gpt-oss-120b",
+    "mistral:ministral-8b-2512",
+    "bedrock:mistral.ministral-3-8b-instruct",
+    "deepinfra:Qwen/Qwen3.5-9B",
+    "deepinfra:BAAI/bge-m3"
+   ],
+   "spendCeiling": "buyer-demo-tight",
+   "note": "dedicated key of Agent B's buyer, on a 2-requests-a-day budget (the budget-refund demo)"
+  }
+ },
+ "spendCeilings": [
+  {
+   "scope": "api_token",
+   "key": "hsk-meter-screen",
+   "budget": "screen-daily"
+  },
+  {
+   "scope": "api_token",
+   "key": "hsk-meter-pool",
+   "budget": "ai-pool-daily"
+  },
+  {
+   "scope": "api_token",
+   "key": "hsk-buyer-0x5270fe01",
+   "budget": "per-buyer-default"
+  },
+  {
+   "scope": "api_token",
+   "key": "hsk-buyer-0x7a0384f0",
+   "budget": "buyer-demo-tight"
+  },
+  {
+   "scope": "workspace",
+   "budget": "workspace-daily"
+  },
+  {
+   "scope": "organization",
+   "budget": "org-safety-cap"
+  }
+ ],
+ "routingPolicies": {
+  "hsk-guard": {
+   "select": [
+    {
+     "default": "ovhcloud:Qwen3Guard-Gen-8B"
+    }
+   ],
+   "on_failure": [
+    "ovhcloud:Qwen3Guard-Gen-0.6B"
+   ]
+  },
+  "hsk-route": {
+   "select": [
+    {
+     "default": "mistral:ministral-3b-2512"
+    }
+   ],
+   "on_failure": [
+    "bedrock:mistral.ministral-3-3b-instruct"
+   ]
+  },
+  "hsk-answer": {
+   "select": [
+    {
+     "when": {
+      "key_id": "<id of the hsk-meter-pool key>"
+     },
+     "target": "deepinfra:openai/gpt-oss-20b"
+    },
+    {
+     "default": "deepinfra:openai/gpt-oss-120b"
+    }
+   ],
+   "on_failure": [
+    "nebius:openai/gpt-oss-120b",
+    "ovhcloud:gpt-oss-120b"
+   ]
+  },
+  "hsk-answer-drill": {
+   "select": [
+    {
+     "default": "deepinfra:BAAI/bge-m3"
+    }
+   ],
+   "on_failure": [
+    "deepinfra:openai/gpt-oss-120b",
+    "nebius:openai/gpt-oss-120b"
+   ]
+  },
+  "hsk-verify": {
+   "select": [
+    {
+     "default": "mistral:ministral-8b-2512"
+    }
+   ],
+   "on_failure": [
+    "bedrock:mistral.ministral-3-8b-instruct",
+    "deepinfra:Qwen/Qwen3.5-9B"
+   ]
+  }
+ },
+ "mcpServers": [
+  {
+   "name": "blockscout",
+   "url": "https://mcp.blockscout.com/mcp",
+   "allowedTools": [
+    "__unlock_blockchain_analysis__",
+    "get_address_info",
+    "get_tokens_by_address",
+    "get_transaction_info",
+    "get_token_transfers_by_address",
+    "lookup_token_by_symbol",
+    "get_block_number"
+   ],
+   "purposeHint": "Live HashKey Chain data (chain_id 177): addresses, token holdings, transactions, contracts. Call __unlock_blockchain_analysis__ first and pass its session_id. Amounts are in base units: divide by 10^decimals."
+  }
+ ],
+ "webSearch": {
+  "enabled": true,
+  "maxResults": 3,
+  "allowedDomains": [
+   "hskchain.net",
+   "hashkey.com",
+   "hsk.xyz",
+   "blockscout.com",
+   "github.com",
+   "coingecko.com",
+   "coinmarketcap.com"
+  ],
+  "perRequest": "otari_web_search with max_uses 1, declared only when the router asks"
+ },
+ "codeExecution": {
+  "enabled": "deployment default (on)",
+  "perRequest": "otari_code_execution, declared only when the router asks"
+ },
+ "guardrails": "none in the gateway: a hosted organization cannot define one without a vendor credential (see OTARI_FEEDBACK.md); screening runs as the hsk-guard routing policy on a free open-weight guard model instead"
+}
