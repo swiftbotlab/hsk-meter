@@ -518,6 +518,8 @@ def main():
         out = {"ok": False, "refused": str(e)[:300], "signed": False}
     except G.HspApiError as e:
         out = {"ok": False, "gateway_error": {"http": e.http_status, "code": e.code, "msg": e.msg}}
+    except G.HspError as e:              # e.g. a missing or group-readable key file (names only, never contents)
+        out = {"ok": False, "error": str(e)[:300], "signed": False}
     print(json.dumps(out, indent=1, default=str))
     return 0 if out.get("ok") else 1
 
