@@ -684,8 +684,9 @@ class B2B4LauncherLifetime(unittest.TestCase):
     def setUp(self):
         if not os.access("/usr/bin/bwrap", os.X_OK):
             self.skipTest("bubblewrap is not installed")
-        base = os.path.join(os.path.dirname(HERE), "tmp")
-        self.d = tempfile.mkdtemp(dir=base if os.path.isdir(base) else None)
+        base = os.path.join(os.path.dirname(HERE), "tmp")      # not /tmp: the sandbox mounts its own /tmp
+        os.makedirs(base, exist_ok=True)
+        self.d = tempfile.mkdtemp(dir=base)
         keys = os.path.join(self.d, "keys")
         os.mkdir(keys, 0o700)
         for f in ("provider.env", "adapter.env", "token.env"):

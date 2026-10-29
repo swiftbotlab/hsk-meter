@@ -32,6 +32,7 @@ jobs:
         with:
           node-version: "22"
       - name: Install pinned dependencies
+        id: deps
         run: python -m pip install --disable-pip-version-check --no-input -r requirements.txt -c constraints.txt
       - name: Bubblewrap for the seller sandbox tests
         run: |
@@ -39,22 +40,31 @@ jobs:
           sudo apt-get install -y --no-install-recommends bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Offline guard self-test (loopback works, everything else is refused)
+        id: guard
         run: python tools/ci_offline.py --selftest
       - name: HSP gateway rail (receiving agent, payment agent, mock gateway, payer wire format)
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
         run: python tools/ci_offline.py server/test_hsp_gateway.py
       - name: x402 protocol + HSP draft
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
         run: python tools/ci_offline.py server/test_protocol.py
       - name: Seller security (rate limits, egress guard, sandbox launcher)
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
         run: python tools/ci_offline.py server/test_security.py
       - name: HashKey ecosystem (APRO feeds, KYC SBT mode)
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
         run: python tools/ci_offline.py server/test_ecosystem.py
       - name: Buyer
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
         run: python tools/ci_offline.py agent/test_buyer.py
       - name: MCP server
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
         run: python tools/ci_offline.py agent/test_mcp.py
       - name: Agent-to-agent (Agent B pays Agent A)
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
         run: python tools/ci_offline.py agent/test_agent_b.py
       - name: Dashboard (snapshot tool against a local mock)
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
         run: node tools/test_dashboard.js
 
   contracts:
