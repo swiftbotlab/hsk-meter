@@ -65,6 +65,16 @@ sentence lives in this repository, and how far it has been proven.
 | Authenticity | every number links to a transaction; what is not done is written down (no live HSP gateway run yet) | [live proof](#live-proof-on-mainnet), [what waits on HashKey](HSP_STATUS.md#what-waits-on-hashkey) |
 | Code quality | CI on every push runs 359 tests: 216 Python tests with the network refused by a guard (4 more are online-only), 53 tests of the public endpoint, 35 dashboard tests and 55 Foundry tests (unit, fuzz, invariants); guards mutation-checked; security notes per component | [CI](https://github.com/swiftbotlab/hsk-meter/actions/workflows/ci.yml), [SECURITY.md](SECURITY.md), [Run the tests](#run-the-tests) |
 
+## Why it is worth backing
+
+| Question | Answer (numbers measured on mainnet, linked below) |
+|---|---|
+| Who pays | software agents that buy data or compute one call at a time: trading agents, research agents, a wallet that checks an address before it sends. Today they need an API key and a monthly plan; here they pay per request from a wallet, with no account |
+| Who sells | any API or data provider: it registers an endpoint and its price on-chain and receives USDC.e for every call it answers |
+| Does it pay for itself | prices of 0.025-0.08 USDC.e per call against a worst measured settlement gas of about $0.011 (246,503 gas at 500 gwei), paid by the seller, so any price from 0.02 USDC.e clears gas with margin. The buyer pays no gas on the default x402 path |
+| Why buyers can trust it | the payment comes back on-chain automatically when the seller cannot deliver; a stale or changed quote is refused, never charged differently; the buyer's spend caps are checked before anything is signed |
+| Why HashKey Chain | every paid call is a USDC.e transfer on HashKey Chain with a public receipt, and HSP adds the merchant layer (orders, Cart and Payment Mandates) on top of the same per-request settlement |
+
 ## At a glance
 
 **Live dashboard:** [swiftbotlab.github.io/hsk-meter](https://swiftbotlab.github.io/hsk-meter/) reads the contract's
