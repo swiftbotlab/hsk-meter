@@ -64,6 +64,9 @@ jobs:
       - name: Agent-to-agent (Agent B pays Agent A)
         if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
         run: python tools/ci_offline.py agent/test_agent_b.py
+      - name: HSP Agentic Payment client (official QA MCP flow, signing firewall, mock server)
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
+        run: python tools/ci_offline.py hsp_qa/test_hsp_qa.py
       - name: Dashboard (snapshot tool against a local mock)
         if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
         run: node tools/test_dashboard.js

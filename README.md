@@ -96,7 +96,7 @@ the KYC SBT compliant mode.
 | Payment protocol | x402 v2 (`402 Payment Required`, `PAYMENT-SIGNATURE`, `PAYMENT-RESPONSE`), network `eip155:177` |
 | Seller | provider [`0x30CCc6d816854d1a66fBfecE15b1515a3E941160`](https://hsk.blockscout.com/address/0x30CCc6d816854d1a66fBfecE15b1515a3E941160), endpoints `1` and `2` |
 | HashKey ecosystem | APRO price feeds (USD value of quotes and totals, gas guard) and an optional KYC SBT compliant mode, see [HashKey ecosystem](#hashkey-ecosystem) |
-| HSP gateway | a HashKey Merchant (HSP) rail for the same requests: Cart Mandate, Payment Mandate, HSP Gateway; built from the official API docs, tested against a mock gateway, switches on with merchant credentials, see [HSP gateway](#hsp-gateway-cart-mandate-payment-mandate-gateway) |
+| HSP gateway | a HashKey Merchant (HSP) rail for the same requests: Cart Mandate, Payment Mandate, HSP Gateway; built from the official API docs, tested against a mock gateway, switches on with merchant credentials; plus a payer for HashKey's official HSP Agentic Payment QA server with a signing firewall ([hsp_qa/](hsp_qa/README.md), QA access requested 2026-10-30), see [HSP gateway](#hsp-gateway-cart-mandate-payment-mandate-gateway) |
 
 ## Live proof on mainnet
 
@@ -508,6 +508,11 @@ conflict in [HSP_STATUS.md](HSP_STATUS.md#payer-wire-format-unverified-against-a
 against our mock gateway; **none of it has run against the live HSP gateway yet**, because merchant credentials are
 requested and not issued.
 
+On 2026-10-30 HashKey opened the official **HSP Agentic Payment** QA server (MCP) for hackathon teams. Our payer for it
+is in [hsp_qa/](hsp_qa/README.md): the documented order, prepare, sign, finalize, submit and query flow under one team
+name, with a signing firewall that checks the server's EIP-712 data against our own order before anything is signed
+(84 offline tests, in CI). Access is allowlisted by IP: we requested it on 2026-10-30, and no live QA payment has run yet.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -546,6 +551,7 @@ What is live and what waits on HashKey:
 | Receiving agent and payment agent | run end to end against the mock: `python3 server/hsp_mockgw.py demo`; a retry after a lost answer pays once |
 | Credentials | requested from HashKey operations; HSP mode stays off until `secrets/hsp/hsp.env` has `APP_KEY`, `APP_SECRET`, `BASE_URL` |
 | QA gateway | our network currently gets a Cloudflare block page from `merchant-qa.hashkeymerchant.com`; access requested |
+| HSP Agentic Payment QA (official MCP, 2026-10-30) | payer and signing firewall in [hsp_qa/](hsp_qa/README.md), 84 offline tests in CI; IP allowlist requested 2026-10-30; no live payment yet |
 | Payment Mandate submission | built in the hosted checkout's wire format (the docs name the route in their architecture diagram only) and submitted to `POST /api/v1/payment/pay-mandate`; the mock gateway checks every field and refuses 15 tampered variants; tests recompute the encoding independently (stdlib, openssl, Node.js). **Unverified against a live gateway.** Open questions: [HSP_STATUS.md](HSP_STATUS.md) |
 
 ## HSP draft adapter on the settlement contract
